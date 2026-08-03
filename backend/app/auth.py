@@ -1,4 +1,4 @@
-"""Dummy login — env credentials only. No user DB."""
+"""Dummy login — any non-empty email/password works. Nothing stored."""
 
 from __future__ import annotations
 
@@ -30,16 +30,6 @@ class UserOut(BaseModel):
 class CurrentUser:
     email: str
     role: str
-
-
-def authenticate_dummy(email: str, password: str) -> Optional[CurrentUser]:
-    """Match against env-configured dummy accounts. Nothing is stored."""
-    settings = get_settings()
-    email_l = email.strip().lower()
-    for account in settings.dummy_accounts:
-        if email_l == account["email"] and password == account["password"]:
-            return CurrentUser(email=account["email"], role=account["role"])
-    return None
 
 
 def create_access_token(email: str, role: str) -> str:
@@ -94,13 +84,13 @@ def get_current_user(
         )
     payload = decode_token(access_token)
     email = payload.get("email")
-    role = payload.get("role")
-    if not email or role not in ("admin", "hr_manager"):
+    role = payload.get("role") or "admin"
+    if not email:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid session",
         )
-    return CurrentUser(email=email, role=role)
+    return CurrentUser(email=str(email), role=str(role))
 
 
 def user_to_out(user: CurrentUser) -> UserOut:

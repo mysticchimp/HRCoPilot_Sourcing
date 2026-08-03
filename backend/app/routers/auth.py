@@ -1,14 +1,13 @@
-"""Login / logout / me — dummy accounts from env, nothing stored."""
+"""Login / logout / me — accept any credentials, issue a session cookie."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Response
 
 from app.auth import (
     CurrentUser,
     LoginIn,
     UserOut,
-    authenticate_dummy,
     clear_auth_cookie,
     create_access_token,
     get_current_user,
@@ -21,12 +20,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/login", response_model=UserOut)
 def login(body: LoginIn, response: Response):
-    user = authenticate_dummy(body.email, body.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
+    # Truly dummy: any non-empty email/password is fine.
+    email = body.email.strip() or "guest"
+    user = CurrentUser(email=email, role="admin")
     token = create_access_token(user.email, user.role)
     set_auth_cookie(response, token)
     return user_to_out(user)

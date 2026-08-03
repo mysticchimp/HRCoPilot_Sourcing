@@ -11,9 +11,8 @@ pip install -r requirements.txt
 cp .env.example .env   # fill APIFY_TOKEN, ANTHROPIC_API_KEY, DATABASE_URL
 ```
 
-Schema applies on boot (`001_init.sql` + `002_archive_and_role_name.sql`). Login is dummy
-(env credentials only — nothing stored in the DB). Defaults: `admin@contra6.com` /
-`admin` and `hr@contra6.com` / `hr`.
+Schema applies on boot (`001_init.sql` + `002_archive_and_role_name.sql`). Login is
+dummy — any non-empty email/password works; nothing is stored.
 
 ```bash
 uvicorn app.main:app --reload --port 8000

@@ -34,7 +34,7 @@ export default function LoginPage() {
     <div className="login">
       <form className="login__form" onSubmit={handleSubmit}>
         <h1 className="login__title">Contra6 Sourcing</h1>
-        <p className="login__subtitle">Sign in to continue</p>
+        <p className="login__subtitle">Enter anything to continue</p>
         {error && (
           <p className="login__error" role="alert">
             {error}
@@ -43,7 +43,7 @@ export default function LoginPage() {
         <label className="login__field">
           <span>Email</span>
           <input
-            type="email"
+            type="text"
             autoComplete="username"
             value={email}
             onChange={(e) => setEmail(e.target.value)}

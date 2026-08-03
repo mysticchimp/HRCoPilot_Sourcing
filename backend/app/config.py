@@ -42,19 +42,6 @@ class Settings:
             "true",
             "yes",
         )
-        # Dummy login accounts (email/password/role). Nothing stored in the DB.
-        self.dummy_accounts = [
-            {
-                "email": os.environ.get("DUMMY_ADMIN_EMAIL", "admin@contra6.com").strip().lower(),
-                "password": os.environ.get("DUMMY_ADMIN_PASSWORD", "admin"),
-                "role": "admin",
-            },
-            {
-                "email": os.environ.get("DUMMY_HR_EMAIL", "hr@contra6.com").strip().lower(),
-                "password": os.environ.get("DUMMY_HR_PASSWORD", "hr"),
-                "role": "hr_manager",
-            },
-        ]
 
 
 @lru_cache
