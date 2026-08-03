@@ -13,6 +13,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.apify.client import (
+    SOURCE_SLOW_MESSAGE,
+    ApifyTransientError,
     compact,
     compile_retrieval,
     fetch_profiles_by_urls,
@@ -22,6 +24,23 @@ from app.apify.client import (
 from app.models import Candidate, PullBatch, Role, RoleCandidate
 
 logger = logging.getLogger("sourcing.pull")
+
+
+def _transient_result(
+    *,
+    pages_scanned: int = 0,
+    status: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "candidates": [],
+        "summary": SOURCE_SLOW_MESSAGE,
+        "batch_id": None,
+        "pages_scanned": pages_scanned,
+        "error": "apify_transient",
+        "status": status,
+        "apify_run_id": run_id,
+    }
 
 
 def _normalize_url(url: str | None) -> str | None:
@@ -147,7 +166,40 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
     retrieval = dict(role.retrieval or {})
     pool_cap = int(retrieval.get("pool_cap") or batch_size)
     batch_size = max(1, min(int(batch_size), 150))
+    pages_scanned = 0
 
+    try:
+        return _pull_batch_inner(
+            db,
+            role=role,
+            role_id=role_id,
+            retrieval=retrieval,
+            pool_cap=pool_cap,
+            batch_size=batch_size,
+        )
+    except ApifyTransientError as e:
+        logger.info(
+            "pull_batch Apify transient failure status=%s run_id=%s — "
+            "returning friendly message (not a raw exception)",
+            e.status,
+            e.run_id,
+        )
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return _transient_result(pages_scanned=pages_scanned, status=e.status, run_id=e.run_id)
+
+
+def _pull_batch_inner(
+    db: Session,
+    *,
+    role: Role,
+    role_id: uuid.UUID,
+    retrieval: dict,
+    pool_cap: int,
+    batch_size: int,
+) -> dict[str, Any]:
     logger.info(
         "pull_batch called role_id=%s slug=%s batch_size=%s pool_cap=%s "
         "last_page=%s retrieval params for compile_retrieval: %s",
@@ -169,7 +221,10 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
     new_urls: list[str] = []
     pages_scanned = 0
     skipped_repeats = 0
+    missing_linkedin_url = 0
     seen = _seen_urls_for_role(db, role_id)
+    # Keep Short-mode profiles so we can store them if Full enrich returns 0.
+    short_by_url: dict[str, dict] = {}
     effective_input = dict(actor_input)
     first_page = True
     max_pages = 40
@@ -191,13 +246,13 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
 
         raw_preview_count = len(preview) if preview else 0
         logger.info(
-            "pull_batch page=%s raw Apify preview count=%s pool_n=%s "
-            "(before dedup) new_urls_so_far=%s skipped_repeats=%s",
+            "pull_batch AFTER probe page=%s raw_preview_count=%s pool_n=%s "
+            "seen_urls=%s new_urls_so_far=%s (dedup input sizes)",
             page,
             raw_preview_count,
             _pool_n,
+            len(seen),
             len(new_urls),
-            skipped_repeats,
         )
 
         _log_apify_call(
@@ -211,6 +266,7 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
                 "page": page,
                 "probe": True,
                 "pool_n": _pool_n,
+                "raw_preview_count": raw_preview_count,
             },
         )
         pages_scanned += 1
@@ -222,22 +278,37 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
             )
             break
 
+        page_new = 0
+        page_skip = 0
+        page_missing = 0
         for item in preview:
             url = _normalize_url(item.get("linkedinUrl"))
             if not url:
+                page_missing += 1
+                missing_linkedin_url += 1
                 continue
+            short_by_url[url] = item
             if url in seen or url in new_urls:
                 skipped_repeats += 1
+                page_skip += 1
                 continue
             new_urls.append(url)
+            page_new += 1
             if len(new_urls) >= batch_size:
                 break
 
         logger.info(
-            "pull_batch after dedup page=%s new_urls=%s skipped_repeats=%s",
+            "pull_batch AFTER dedup page=%s preview=%s extracted_new=%s "
+            "skipped_repeats_page=%s missing_linkedinUrl_page=%s "
+            "new_urls_total=%s skipped_repeats_total=%s short_by_url=%s",
             page,
+            raw_preview_count,
+            page_new,
+            page_skip,
+            page_missing,
             len(new_urls),
             skipped_repeats,
+            len(short_by_url),
         )
 
         if len(new_urls) >= batch_size:
@@ -246,9 +317,12 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
 
     target_urls = [u for u in new_urls[:batch_size] if u not in seen]
     logger.info(
-        "pull_batch target_urls for Full enrich=%s (from new_urls=%s)",
+        "pull_batch target_urls for Full enrich=%s (from new_urls=%s "
+        "seen=%s missing_linkedinUrl_total=%s)",
         len(target_urls),
         len(new_urls),
+        len(seen),
+        missing_linkedin_url,
     )
 
     if not target_urls:
@@ -256,10 +330,12 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
         role.updated_at = datetime.now(timezone.utc)
         db.commit()
         logger.info(
-            "returning 0 candidates (no new URLs after probe/dedup; "
-            "skipped_repeats=%s pages_scanned=%s)",
+            "returning 0 candidates to UI (no new URLs after probe/dedup; "
+            "skipped_repeats=%s pages_scanned=%s missing_linkedinUrl=%s) "
+            "commit=ok",
             skipped_repeats,
             pages_scanned,
+            missing_linkedin_url,
         )
         return {
             "candidates": [],
@@ -272,12 +348,20 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
         }
 
     mode = retrieval.get("profileScraperMode") or "Full"
+    logger.info(
+        "pull_batch starting Full enrich for %s urls mode=%s "
+        "(same run will be logged by fetch_profiles)",
+        len(target_urls),
+        mode,
+    )
     profiles, status, run_id = fetch_profiles_by_urls(target_urls, mode=mode)
     logger.info(
-        "pull_batch Full enrich done run_id=%s status=%s raw profile count=%s",
+        "pull_batch Full enrich done run_id=%s status=%s raw profile count=%s "
+        "(expected ~%s)",
         run_id,
         status,
         len(profiles) if profiles else 0,
+        len(target_urls),
     )
 
     batch_number = _next_batch_number(db, role_id)
@@ -294,23 +378,59 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
             "retrieval": retrieval,
             "actor_status": status,
             "probe_pages": pages_scanned,
+            "full_enrich_raw_count": len(profiles) if profiles else 0,
         },
     )
 
     by_url: dict[str, dict] = {}
+    full_missing_url = 0
     for p in profiles:
         u = _normalize_url(p.get("linkedinUrl"))
         if u:
             by_url[u] = p
+        else:
+            full_missing_url += 1
+    logger.info(
+        "pull_batch Full enrich URL index size=%s missing_linkedinUrl=%s "
+        "target_urls=%s overlap=%s",
+        len(by_url),
+        full_missing_url,
+        len(target_urls),
+        len(set(by_url) & set(target_urls)),
+    )
+
+    if not by_url and short_by_url:
+        logger.info(
+            "pull_batch Full enrich returned 0 usable profiles — falling back to "
+            "Short probe profiles for %s target urls (Short cache size=%s)",
+            len(target_urls),
+            len(short_by_url),
+        )
 
     stored: list[Candidate] = []
+    upserted = 0
+    role_candidate_inserts = 0
+    used_short_fallback = 0
+    skipped_no_profile = 0
     for i, url in enumerate(target_urls):
         profile = by_url.get(url)
+        source = "full"
         if not profile:
+            profile = short_by_url.get(url)
+            source = "short_fallback"
+        if not profile:
+            skipped_no_profile += 1
+            logger.info(
+                "pull_batch no Full or Short profile for target url=%s",
+                url,
+            )
             continue
+        if source == "short_fallback":
+            used_short_fallback += 1
         shaped = compact(profile, i)
         cand = _upsert_candidate(db, profile, shaped)
-        db.execute(
+        upserted += 1
+        result = db.execute(
             pg_insert(RoleCandidate)
             .values(
                 role_id=role_id,
@@ -320,19 +440,40 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
             )
             .on_conflict_do_nothing(index_elements=["role_id", "candidate_id"])
         )
+        # rowcount: 1 insert, 0 on conflict do nothing
+        rc = result.rowcount if result.rowcount is not None else -1
+        if rc == 1:
+            role_candidate_inserts += 1
         stored.append(cand)
         seen.add(url)
+
+    logger.info(
+        "pull_batch store step upserted_candidates=%s "
+        "role_candidates_inserted=%s used_short_fallback=%s "
+        "skipped_no_profile=%s stored_list=%s — about to commit",
+        upserted,
+        role_candidate_inserts,
+        used_short_fallback,
+        skipped_no_profile,
+        len(stored),
+    )
 
     role.last_page = page
     role.updated_at = datetime.now(timezone.utc)
     db.commit()
+    logger.info(
+        "pull_batch DB commit ok role_id=%s batch_id=%s last_page=%s",
+        role_id,
+        batch.id,
+        page,
+    )
 
     summary = (
         f"Pulled {len(stored)} new (skipped {skipped_repeats} repeats "
         f"across {pages_scanned} pages)."
     )
     logger.info(
-        "returning %s candidates batch_id=%s run_id=%s status=%s summary=%s",
+        "returning %s candidates to UI batch_id=%s run_id=%s status=%s summary=%s",
         len(stored),
         batch.id,
         run_id,

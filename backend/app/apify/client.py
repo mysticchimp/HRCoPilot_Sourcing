@@ -16,7 +16,16 @@ from app.maps import DEFAULT_LOCATION, FUNCTION_MAP, SENIORITY_MAP, YEARS_MAP
 logger = logging.getLogger("sourcing.apify")
 
 ACTOR = "harvestapi~linkedin-profile-search"
-RUN_SYNC_URL = f"https://api.apify.com/v2/acts/{ACTOR}/run-sync-get-dataset-items"
+
+# Async start → poll → fetch. Per-request timeouts stay short; only the loop
+# may run for minutes while Apify retries flaky LinkedIn pages.
+POLL_EVERY_SECS = 4
+POLL_REQUEST_TIMEOUT = 12
+START_REQUEST_TIMEOUT = 15
+DATASET_REQUEST_TIMEOUT = 90
+DEFAULT_MAX_WAIT_SECS = 600  # 10 minutes overall ceiling
+PROBE_MAX_WAIT_SECS = 300  # Short-mode probe: 5 minutes
+SLOW_LOG_AFTER_SECS = 60
 
 # Order to drop filters when a query returns zero — most-likely culprit first.
 RELAX_ORDER = [
@@ -26,6 +35,27 @@ RELAX_ORDER = [
     "functionIds",
     "industryIds",
 ]
+
+SOURCE_SLOW_MESSAGE = (
+    "The source is taking longer than usual to respond right now "
+    "(this happens occasionally with LinkedIn scraping) - want me to "
+    "retry, or try a different anchor keyword?"
+)
+
+
+class ApifyTransientError(Exception):
+    """Apify run failed, aborted, timed out, or exceeded our polling ceiling."""
+
+    def __init__(
+        self,
+        message: str = SOURCE_SLOW_MESSAGE,
+        *,
+        status: str | None = None,
+        run_id: str | None = None,
+    ):
+        super().__init__(message)
+        self.status = status
+        self.run_id = run_id
 
 
 def _token() -> str:
@@ -86,49 +116,185 @@ def compile_retrieval(spec: dict, pool_cap: int) -> dict[str, Any]:
     return actor
 
 
-def _apify_header(headers: Any, *names: str) -> str | None:
-    """Case-insensitive lookup across common Apify response header spellings."""
-    lower = {str(k).lower(): v for k, v in headers.items()}
-    for name in names:
-        v = lower.get(name.lower())
-        if v:
-            return str(v)
-    return None
+def _run_actor_async(
+    actor_input: dict,
+    *,
+    poll_every: int = POLL_EVERY_SECS,
+    max_wait: int = DEFAULT_MAX_WAIT_SECS,
+    label: str = "apify",
+) -> tuple[list, str, str]:
+    """Start an actor run, poll status with short per-request timeouts, fetch items.
+
+    Returns (items, status, run_id) on SUCCEEDED.
+    Raises ApifyTransientError on FAILED / ABORTED / TIMED-OUT / ceiling exceeded
+    / transport failures that prevent a clean SUCCEEDED outcome.
+    """
+    token = _token()
+    logger.info(
+        "%s sending actor input payload: %s",
+        label,
+        json.dumps(actor_input, default=str),
+    )
+    try:
+        r = requests.post(
+            f"https://api.apify.com/v2/acts/{ACTOR}/runs",
+            params={"token": token},
+            json=actor_input,
+            timeout=START_REQUEST_TIMEOUT,
+        )
+        r.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning("%s start failed: %s", label, type(e).__name__)
+        raise ApifyTransientError(
+            SOURCE_SLOW_MESSAGE, status="START_FAILED", run_id=None
+        ) from e
+
+    run = r.json()["data"]
+    run_id, dataset_id = run["id"], run["defaultDatasetId"]
+    logger.info(
+        "%s started run_id=%s dataset_id=%s initial_status=%s",
+        label,
+        run_id,
+        dataset_id,
+        run.get("status"),
+    )
+
+    waited = 0
+    status = run.get("status") or "RUNNING"
+    info: dict[str, Any] = run
+    last_slow_log_at = 0
+
+    while True:
+        if waited >= SLOW_LOG_AFTER_SECS and (
+            waited - last_slow_log_at >= 60 or last_slow_log_at == 0
+        ):
+            logger.info(
+                "%s poll still running after %ss run_id=%s status=%s "
+                "(Apify may be retrying a flaky LinkedIn page)",
+                label,
+                waited,
+                run_id,
+                status,
+            )
+            last_slow_log_at = waited
+
+        try:
+            info = requests.get(
+                f"https://api.apify.com/v2/actor-runs/{run_id}",
+                params={"token": token},
+                timeout=POLL_REQUEST_TIMEOUT,
+            ).json()["data"]
+            status = info["status"]
+        except requests.RequestException as e:
+            logger.warning(
+                "%s poll request error run_id=%s waited=%ss err=%s — will retry",
+                label,
+                run_id,
+                waited,
+                type(e).__name__,
+            )
+            if waited >= max_wait:
+                raise ApifyTransientError(
+                    SOURCE_SLOW_MESSAGE, status="POLL_TIMEOUT", run_id=run_id
+                ) from e
+            time.sleep(poll_every)
+            waited += poll_every
+            continue
+
+        done = status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT")
+        if done or waited >= max_wait:
+            break
+        time.sleep(poll_every)
+        waited += poll_every
+
+    status_message = info.get("statusMessage")
+    if waited >= max_wait and status not in (
+        "SUCCEEDED",
+        "FAILED",
+        "ABORTED",
+        "TIMED-OUT",
+    ):
+        status = "MAX_WAIT_EXCEEDED"
+
+    if status != "SUCCEEDED":
+        logger.info(
+            "%s terminal non-success run_id=%s status=%s statusMessage=%s waited=%ss",
+            label,
+            run_id,
+            status,
+            status_message,
+            waited,
+        )
+        raise ApifyTransientError(
+            SOURCE_SLOW_MESSAGE, status=status, run_id=run_id
+        )
+
+    # Always fetch the dataset belonging to THIS finished run (not a stale id).
+    finished_dataset_id = info.get("defaultDatasetId") or dataset_id
+    if finished_dataset_id != dataset_id:
+        logger.info(
+            "%s using finished-run dataset_id=%s (start had %s)",
+            label,
+            finished_dataset_id,
+            dataset_id,
+        )
+    dataset_id = finished_dataset_id
+
+    try:
+        items = requests.get(
+            f"https://api.apify.com/v2/datasets/{dataset_id}/items",
+            params={"token": token, "clean": "true", "format": "json"},
+            timeout=DATASET_REQUEST_TIMEOUT,
+        ).json()
+    except requests.RequestException as e:
+        logger.warning(
+            "%s dataset fetch failed run_id=%s dataset_id=%s err=%s",
+            label,
+            run_id,
+            dataset_id,
+            type(e).__name__,
+        )
+        raise ApifyTransientError(
+            SOURCE_SLOW_MESSAGE, status="DATASET_FETCH_FAILED", run_id=run_id
+        ) from e
+
+    raw = items or []
+    sample_keys = sorted((raw[0] or {}).keys()) if raw else []
+    sample_url = (raw[0] or {}).get("linkedinUrl") if raw else None
+    logger.info(
+        "%s finished run_id=%s dataset_id=%s status=%s statusMessage=%s "
+        "raw dataset item count=%s waited=%ss sample_keys=%s sample_linkedinUrl=%s",
+        label,
+        run_id,
+        dataset_id,
+        status,
+        status_message,
+        len(raw) if isinstance(raw, list) else 0,
+        waited,
+        sample_keys,
+        sample_url,
+    )
+    return raw if isinstance(raw, list) else [], status, run_id
 
 
 def probe_pool(actor_input: dict, start_page: int = 1) -> tuple[int | None, list]:
-    """Cheap pre-flight: ONE search page in Short mode.
+    """Cheap pre-flight: ONE search page in Short mode via async start→poll→fetch.
 
     Returns (total_count_or_None, [short_profiles]) without Full enrichment.
-    Ported from contra6_source2.probe_pool; start_page added for pagination.
     """
     probe = dict(actor_input)
     probe["profileScraperMode"] = "Short"
     probe["takePages"] = 1
     probe["startPage"] = max(1, int(start_page))
     probe.pop("maxItems", None)
-    logger.info(
-        "probe_pool sending actor input payload: %s",
-        json.dumps(probe, default=str),
+
+    items, status, run_id = _run_actor_async(
+        probe,
+        poll_every=POLL_EVERY_SECS,
+        max_wait=PROBE_MAX_WAIT_SECS,
+        label="probe_pool",
     )
-    r = requests.post(
-        RUN_SYNC_URL, params={"token": _token()}, json=probe, timeout=180
-    )
-    run_id = _apify_header(
-        r.headers, "x-apify-run-id", "X-Apify-Run-Id", "x-apify-actor-run-id"
-    )
-    http_status = r.status_code
-    pagination_total = _apify_header(r.headers, "x-apify-pagination-total")
-    logger.info(
-        "probe_pool Apify response http_status=%s run_id=%s "
-        "X-Apify-Pagination-Total=%s",
-        http_status,
-        run_id or "(none in headers; sync endpoint)",
-        pagination_total,
-    )
-    r.raise_for_status()
-    items = r.json() or []
-    raw_count = len(items) if isinstance(items, list) else 0
+    raw_count = len(items)
     count = None
     if items:
         count = (
@@ -136,40 +302,13 @@ def probe_pool(actor_input: dict, start_page: int = 1) -> tuple[int | None, list
                 "totalElements"
             )
         )
-    # Sync endpoint has no separate run status field — HTTP 2xx => request ok.
-    # When the dataset is empty, look up the latest actor run for statusMessage
-    # (e.g. free-tier limits that still return HTTP 201 + []).
-    status_message = None
-    latest_run_id = run_id
-    latest_status = "SUCCEEDED" if 200 <= http_status < 300 else f"HTTP_{http_status}"
-    if raw_count == 0:
-        try:
-            rr = requests.get(
-                f"https://api.apify.com/v2/acts/{ACTOR}/runs",
-                params={"token": _token(), "limit": 1, "desc": 1},
-                timeout=30,
-            )
-            if rr.ok:
-                latest = ((rr.json().get("data") or {}).get("items") or [None])[0]
-                if latest:
-                    latest_run_id = latest.get("id") or latest_run_id
-                    latest_status = latest.get("status") or latest_status
-                    info = requests.get(
-                        f"https://api.apify.com/v2/actor-runs/{latest_run_id}",
-                        params={"token": _token()},
-                        timeout=30,
-                    ).json().get("data") or {}
-                    status_message = info.get("statusMessage")
-        except Exception as e:  # noqa: BLE001 — best-effort diagnostics only
-            logger.info("probe_pool could not fetch latest run statusMessage: %s", e)
     logger.info(
         "probe_pool raw dataset item count=%s pool_n(totalElements)=%s "
-        "status=%s statusMessage=%s run_id=%s startPage=%s",
+        "status=%s run_id=%s startPage=%s",
         raw_count,
         count,
-        latest_status,
-        status_message,
-        latest_run_id or "(sync/unknown)",
+        status,
+        run_id,
         probe.get("startPage"),
     )
     return count, items
@@ -223,68 +362,28 @@ def probe_with_relax(
 
 
 def fetch_profiles(
-    actor_input: dict, poll_every: int = 6, max_wait: int = 1800
+    actor_input: dict,
+    poll_every: int = POLL_EVERY_SECS,
+    max_wait: int = DEFAULT_MAX_WAIT_SECS,
 ) -> tuple[list, str, str]:
     """Async run: start -> poll -> fetch dataset. Ported from contra6_source2.
 
-    Returns (items, status, run_id).
+    Returns (items, status, run_id) on SUCCEEDED.
+    Raises ApifyTransientError on failed / aborted / ceiling exceeded.
     """
-    token = _token()
-    logger.info(
-        "fetch_profiles sending actor input payload: %s",
-        json.dumps(actor_input, default=str),
+    return _run_actor_async(
+        actor_input,
+        poll_every=poll_every,
+        max_wait=max_wait,
+        label="fetch_profiles",
     )
-    r = requests.post(
-        f"https://api.apify.com/v2/acts/{ACTOR}/runs",
-        params={"token": token},
-        json=actor_input,
-        timeout=60,
-    )
-    r.raise_for_status()
-    run = r.json()["data"]
-    run_id, dataset_id = run["id"], run["defaultDatasetId"]
-    logger.info(
-        "fetch_profiles started run_id=%s dataset_id=%s initial_status=%s",
-        run_id,
-        dataset_id,
-        run.get("status"),
-    )
-
-    waited = 0
-    status = "RUNNING"
-    while True:
-        info = requests.get(
-            f"https://api.apify.com/v2/actor-runs/{run_id}",
-            params={"token": token},
-            timeout=60,
-        ).json()["data"]
-        status = info["status"]
-        done = status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT")
-        if done or waited >= max_wait:
-            break
-        time.sleep(poll_every)
-        waited += poll_every
-
-    status_message = info.get("statusMessage")
-    items = requests.get(
-        f"https://api.apify.com/v2/datasets/{dataset_id}/items",
-        params={"token": token, "clean": "true", "format": "json"},
-        timeout=180,
-    ).json()
-    raw = items or []
-    logger.info(
-        "fetch_profiles finished run_id=%s status=%s statusMessage=%s "
-        "raw dataset item count=%s",
-        run_id,
-        status,
-        status_message,
-        len(raw) if isinstance(raw, list) else 0,
-    )
-    return raw, status, run_id
 
 
 def fetch_profiles_by_urls(
-    urls: list[str], mode: str = "Full", poll_every: int = 6, max_wait: int = 1800
+    urls: list[str],
+    mode: str = "Full",
+    poll_every: int = POLL_EVERY_SECS,
+    max_wait: int = DEFAULT_MAX_WAIT_SECS,
 ) -> tuple[list, str, str]:
     """Full (or Full+email) enrichment targeted at specific LinkedIn profile URLs.
 
@@ -311,7 +410,7 @@ def recover_last_dataset() -> list:
             "clean": "true",
             "format": "json",
         },
-        timeout=180,
+        timeout=DATASET_REQUEST_TIMEOUT,
     )
     r.raise_for_status()
     return r.json() or []
@@ -321,12 +420,27 @@ def current_role(p: dict) -> tuple[str, str]:
     for exp in p.get("experience", []) or []:
         if (exp.get("endDate") or {}).get("text") == "Present":
             return exp.get("position", "") or "", exp.get("companyName", "") or ""
-    cp = (p.get("currentPosition") or [{}])[0]
+    # Full profiles use currentPosition; Short search hits use currentPositions.
+    cp_list = p.get("currentPosition") or p.get("currentPositions") or []
+    cp = cp_list[0] if isinstance(cp_list, list) and cp_list else {}
+    if not isinstance(cp, dict):
+        cp = {}
     exp0 = (p.get("experience") or [{}])[0]
-    return (
-        exp0.get("position", "") or "",
-        cp.get("companyName", exp0.get("companyName", "")) or "",
+    if not isinstance(exp0, dict):
+        exp0 = {}
+    company = (
+        cp.get("companyName")
+        or exp0.get("companyName")
+        or ((cp.get("company") or {}).get("name") if isinstance(cp.get("company"), dict) else "")
+        or ""
     )
+    title = (
+        exp0.get("position")
+        or cp.get("position")
+        or cp.get("title")
+        or ""
+    )
+    return title or "", company or ""
 
 
 def location_str(p: dict) -> str:

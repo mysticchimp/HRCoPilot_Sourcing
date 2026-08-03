@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Role
+from app.apify.client import SOURCE_SLOW_MESSAGE, ApifyTransientError
 from app.services import chat as chat_service
 from app.services.pull_batch import list_role_candidates, pull_batch
 
@@ -71,8 +72,15 @@ def chat_message(role_slug: str, body: MessageIn, db: Session = Depends(get_db))
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    except ApifyTransientError:
+        # Should already be caught inside pull_batch; belt-and-suspenders.
+        raise HTTPException(status_code=503, detail=SOURCE_SLOW_MESSAGE) from None
+    except Exception:
+        # Never leak raw requests/urllib3 strings to the client.
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong on our side — please try again.",
+        ) from None
 
 
 @router.get("/roles/{slug}/candidates")
@@ -96,5 +104,18 @@ def pull_role_batch(
     )
     try:
         return pull_batch(db, role.id, batch_size=size)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    except ApifyTransientError:
+        return {
+            "candidates": [],
+            "summary": SOURCE_SLOW_MESSAGE,
+            "batch_id": None,
+            "pages_scanned": 0,
+            "error": "apify_transient",
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong on our side — please try again.",
+        ) from None

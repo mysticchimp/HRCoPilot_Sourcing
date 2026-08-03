@@ -1,6 +1,8 @@
 """Re-export Apify helpers."""
 
 from app.apify.client import (
+    SOURCE_SLOW_MESSAGE,
+    ApifyTransientError,
     RELAX_ORDER,
     compact,
     compile_retrieval,
@@ -12,6 +14,8 @@ from app.apify.client import (
 )
 
 __all__ = [
+    "SOURCE_SLOW_MESSAGE",
+    "ApifyTransientError",
     "RELAX_ORDER",
     "compact",
     "compile_retrieval",

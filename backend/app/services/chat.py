@@ -791,7 +791,10 @@ def _finalize_and_pull(db: Session, session: ChatSession) -> dict:
     batch_size = int(retrieval.get("pool_cap") or 25)
     result = pull_batch(db, role.id, batch_size=batch_size)
     summary = result.get("summary", "")
-    reply = f"Filters locked. {summary}"
+    if result.get("error") == "apify_transient":
+        reply = summary  # friendly SOURCE_SLOW_MESSAGE — no stack/raw exception
+    else:
+        reply = f"Filters locked. {summary}"
     _save_msg(db, session.id, "assistant", reply)
     return _session_payload(
         db,
@@ -971,7 +974,10 @@ def _ready_change_confirm(
     batch_size = int(retrieval.get("pool_cap") or 25)
     result = pull_batch(db, role.id, batch_size=batch_size)
     summary = result.get("summary", "")
-    reply = f"Filter updated; pagination reset. {summary}"
+    if result.get("error") == "apify_transient":
+        reply = summary
+    else:
+        reply = f"Filter updated; pagination reset. {summary}"
     _save_msg(db, session.id, "assistant", reply)
     return _session_payload(
         db,
