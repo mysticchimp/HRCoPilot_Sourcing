@@ -29,9 +29,12 @@ async def lifespan(_app: FastAPI):
 settings = get_settings()
 app = FastAPI(title="Contra6 Sourcing", version="1.0.0", lifespan=lifespan)
 
+# Vercel previews/production are https://*.vercel.app — always allow those in
+# addition to explicit CORS_ORIGINS (localhost, custom domains, etc.).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins or ["*"],
+    allow_origins=settings.cors_origins or ["http://localhost:5173"],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

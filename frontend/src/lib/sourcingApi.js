@@ -4,14 +4,21 @@ const API_BASE =
 
 async function request(path, options = {}) {
   const { headers, ...rest } = options;
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...rest,
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(headers || {}),
-    },
-  });
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...rest,
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(headers || {}),
+      },
+    });
+  } catch {
+    throw new Error(
+      'Cannot reach the API (network/CORS). If this is a deployed UI, ensure the API allows this origin.',
+    );
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {

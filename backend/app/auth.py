@@ -41,12 +41,14 @@ def create_access_token(email: str, role: str) -> str:
 
 def set_auth_cookie(response: Response, token: str) -> None:
     settings = get_settings()
+    # Cross-site (Vercel UI → Render API) needs SameSite=None + Secure.
+    secure = settings.cookie_secure
     response.set_cookie(
         key=COOKIE_NAME,
         value=token,
         httponly=True,
-        samesite="lax",
-        secure=settings.cookie_secure,
+        samesite="none" if secure else "lax",
+        secure=secure,
         max_age=settings.jwt_expire_hours * 3600,
         path="/",
     )
@@ -54,12 +56,13 @@ def set_auth_cookie(response: Response, token: str) -> None:
 
 def clear_auth_cookie(response: Response) -> None:
     settings = get_settings()
+    secure = settings.cookie_secure
     response.delete_cookie(
         key=COOKIE_NAME,
         path="/",
         httponly=True,
-        samesite="lax",
-        secure=settings.cookie_secure,
+        samesite="none" if secure else "lax",
+        secure=secure,
     )
 
 
