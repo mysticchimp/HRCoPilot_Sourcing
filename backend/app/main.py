@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.db import run_migrations
+from app.routers import auth as auth_router
 from app.routers.sourcing import router
 
 logging.basicConfig(
@@ -36,6 +37,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router.router)
 app.include_router(router)
 
 

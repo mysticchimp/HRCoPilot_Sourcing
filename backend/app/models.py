@@ -1,4 +1,4 @@
-"""SQLAlchemy models matching migrations/001_init.sql."""
+"""SQLAlchemy models matching migrations/001_init.sql (+ 002, 003)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ class Role(Base):
     client: Mapped[Optional[str]] = mapped_column(Text)
     retrieval: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     last_page: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -68,6 +69,8 @@ class RoleCandidate(Base):
     batch_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("pull_batches.id", ondelete="SET NULL")
     )
+    # Snapshot of roles.role_name at search/pull time — readability only, not for lookups.
+    role_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
     pulled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

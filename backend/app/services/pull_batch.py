@@ -504,6 +504,7 @@ def _pull_batch_inner(
                 role_id=role_id,
                 candidate_id=cand.id,
                 batch_id=batch.id,
+                role_name=role.role_name or "",
                 pulled_at=datetime.now(timezone.utc),
             )
             .on_conflict_do_nothing(index_elements=["role_id", "candidate_id"])

@@ -1,6 +1,10 @@
 import os
 from functools import lru_cache
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 class Settings:
     def __init__(self) -> None:
@@ -28,6 +32,29 @@ class Settings:
         ]
         self.query_model = os.environ.get("QUERY_MODEL", "claude-haiku-4-5")
         self.default_batch_size = int(os.environ.get("DEFAULT_BATCH_SIZE", "25"))
+        self.jwt_secret = os.environ.get(
+            "JWT_SECRET",
+            "dev-only-change-me-in-production",
+        )
+        self.jwt_expire_hours = int(os.environ.get("JWT_EXPIRE_HOURS", "24"))
+        self.cookie_secure = os.environ.get("COOKIE_SECURE", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        # Dummy login accounts (email/password/role). Nothing stored in the DB.
+        self.dummy_accounts = [
+            {
+                "email": os.environ.get("DUMMY_ADMIN_EMAIL", "admin@contra6.com").strip().lower(),
+                "password": os.environ.get("DUMMY_ADMIN_PASSWORD", "admin"),
+                "role": "admin",
+            },
+            {
+                "email": os.environ.get("DUMMY_HR_EMAIL", "hr@contra6.com").strip().lower(),
+                "password": os.environ.get("DUMMY_HR_PASSWORD", "hr"),
+                "role": "hr_manager",
+            },
+        ]
 
 
 @lru_cache

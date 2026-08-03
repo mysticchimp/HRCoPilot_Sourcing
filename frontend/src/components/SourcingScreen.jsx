@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
+  archiveRole,
   fetchRoleCandidates,
   listRoles,
   sendChatMessage,
@@ -8,7 +10,7 @@ import {
 
 const CHAT_MIN = 240;
 const CHAT_MAX = 600;
-const CHAT_DEFAULT = 280;
+const CHAT_DEFAULT = 420;
 
 function ExternalLinkIcon() {
   return (
@@ -35,8 +37,15 @@ export default function SourcingScreen() {
   const [error, setError] = useState(null);
   const [summary, setSummary] = useState(null);
   const [chatWidth, setChatWidth] = useState(CHAT_DEFAULT);
+  const [menuOpen, setMenuOpen] = useState(false);
   const threadRef = useRef(null);
+  const inputRef = useRef(null);
+  const menuRef = useRef(null);
   const dragRef = useRef({ active: false, startX: 0, startW: CHAT_DEFAULT });
+
+  const activeRole = roles.find((r) => r.slug === activeSlug) || null;
+  const activeLabel =
+    activeSlug === 'new' ? '— new role —' : activeRole?.role_name || activeSlug;
 
   const refreshRoles = useCallback(async () => {
     try {
@@ -105,6 +114,14 @@ export default function SourcingScreen() {
     }
   }, [messages, busy]);
 
+  // Re-focus after send + after the assistant reply renders. The input is
+  // disabled while busy, which drops focus; restore it once busy clears.
+  useEffect(() => {
+    if (!busy && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [messages, busy]);
+
   useEffect(() => {
     const onMove = (e) => {
       if (!dragRef.current.active) return;
@@ -129,6 +146,17 @@ export default function SourcingScreen() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onDoc = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [menuOpen]);
+
   const handleResizeStart = (e) => {
     e.preventDefault();
     dragRef.current = { active: true, startX: e.clientX, startW: chatWidth };
@@ -136,15 +164,37 @@ export default function SourcingScreen() {
     document.body.style.userSelect = 'none';
   };
 
-  const handleRoleChange = (e) => {
-    const slug = e.target.value;
+  const selectRole = (slug) => {
+    setMenuOpen(false);
     setActiveSlug(slug);
     bootstrapSession(slug);
   };
 
   const handleNewRole = () => {
+    setMenuOpen(false);
     setActiveSlug('new');
     bootstrapSession('new');
+  };
+
+  const handleArchive = async (role, e) => {
+    e.stopPropagation();
+    const ok = window.confirm(
+      `Archive ${role.role_name}? You can restore it later from Archived Roles.`,
+    );
+    if (!ok) return;
+    setError(null);
+    try {
+      await archiveRole(role.slug);
+      setMenuOpen(false);
+      if (activeSlug === role.slug) {
+        setActiveSlug('new');
+        await bootstrapSession('new');
+      } else {
+        await refreshRoles();
+      }
+    } catch (err) {
+      setError(err.message);
+    }
   };
 
   const handleSend = async (e) => {
@@ -199,23 +249,62 @@ export default function SourcingScreen() {
   return (
     <div className="sourcing">
       <header className="sourcing__toolbar">
-        <div className="sourcing__brand">Contra6 Sourcing</div>
-        <label className="sourcing__role-picker">
+        <div className="sourcing__brand">Sourcing</div>
+
+        <div className="sourcing__role-picker" ref={menuRef}>
           <span className="sourcing__label">Role</span>
-          <select
-            value={activeSlug}
-            onChange={handleRoleChange}
+          <button
+            type="button"
+            className="role-menu__trigger"
             disabled={busy}
-            aria-label="Select role"
+            aria-haspopup="listbox"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((o) => !o)}
           >
-            <option value="new">— new role —</option>
-            {roles.map((r) => (
-              <option key={r.slug} value={r.slug}>
-                {r.role_name}
-              </option>
-            ))}
-          </select>
-        </label>
+            {activeLabel}
+          </button>
+          {menuOpen && (
+            <ul className="role-menu" role="listbox">
+              <li>
+                <button
+                  type="button"
+                  className="role-menu__item"
+                  onClick={() => selectRole('new')}
+                >
+                  — new role —
+                </button>
+              </li>
+              {roles.map((r) => (
+                <li key={r.slug} className="role-menu__row">
+                  <button
+                    type="button"
+                    className={`role-menu__item${
+                      r.slug === activeSlug ? ' role-menu__item--active' : ''
+                    }`}
+                    onClick={() => selectRole(r.slug)}
+                  >
+                    {r.role_name}
+                  </button>
+                  <button
+                    type="button"
+                    className="role-menu__archive"
+                    aria-label={`Archive ${r.role_name}`}
+                    title="Archive role"
+                    onClick={(e) => handleArchive(r, e)}
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {activeRole && (
+            <span className="sourcing__role-id mono" title={activeRole.id}>
+              ID: {activeRole.id}
+            </span>
+          )}
+        </div>
+
         <button
           type="button"
           className="btn btn--ghost"
@@ -224,6 +313,9 @@ export default function SourcingScreen() {
         >
           Start new role
         </button>
+        <Link to="/sourcing/archived" className="sourcing__archived-link">
+          Archived Roles
+        </Link>
         {summary && <p className="sourcing__summary mono">{summary}</p>}
       </header>
 
@@ -256,6 +348,7 @@ export default function SourcingScreen() {
           </div>
           <form className="sourcing__composer" onSubmit={handleSend}>
             <input
+              ref={inputRef}
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}

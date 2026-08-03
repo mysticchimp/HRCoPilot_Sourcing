@@ -11,11 +11,9 @@ pip install -r requirements.txt
 cp .env.example .env   # fill APIFY_TOKEN, ANTHROPIC_API_KEY, DATABASE_URL
 ```
 
-Apply schema (also auto-runs on boot if `roles` is missing):
-
-```bash
-psql "$DATABASE_URL" -f migrations/001_init.sql
-```
+Schema applies on boot (`001_init.sql` + `002_archive_and_role_name.sql`). Login is dummy
+(env credentials only — nothing stored in the DB). Defaults: `admin@contra6.com` /
+`admin` and `hr@contra6.com` / `hr`.
 
 ```bash
 uvicorn app.main:app --reload --port 8000
@@ -25,7 +23,13 @@ uvicorn app.main:app --reload --port 8000
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/roles` | Role dropdown |
+| POST | `/auth/login` | Dummy email/password → httpOnly JWT cookie |
+| POST | `/auth/logout` | Clear cookie |
+| GET | `/auth/me` | Current session user |
+| GET | `/roles` | Active roles (`?include_archived=true` for all) |
+| GET | `/roles/archived` | Archived roles |
+| POST | `/roles/{slug}/archive` | Soft-archive |
+| POST | `/roles/{slug}/unarchive` | Restore |
 | POST | `/roles/{slug}/session` | Start/resume chat (`slug=new` for intake) |
 | POST | `/chat/{role_slug}/message` | Intake / confirm / ready state machine |
 | GET | `/roles/{slug}/candidates` | Results table |
