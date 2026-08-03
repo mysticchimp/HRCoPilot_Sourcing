@@ -25,7 +25,14 @@ export default function AppShell() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div className="topbar__brand">Contra6</div>
+        <div className="topbar__brand">
+          <img
+            className="topbar__logo"
+            src="/contra6-logo.png"
+            alt="Contra6 Engineering"
+          />
+          <span className="topbar__product">Sourcing</span>
+        </div>
         <div className="topbar__user">
           <span className="topbar__email">{user.email}</span>
           <span className="topbar__role mono">{user.role}</span>

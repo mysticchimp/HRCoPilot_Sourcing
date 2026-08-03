@@ -33,8 +33,11 @@ export default function LoginPage() {
   return (
     <div className="login">
       <form className="login__form" onSubmit={handleSubmit}>
-        <h1 className="login__title">Contra6 Sourcing</h1>
-        <p className="login__subtitle">Enter anything to continue</p>
+        <img
+          className="login__logo"
+          src="/contra6-logo.png"
+          alt="Contra6 Engineering"
+        />
         {error && (
           <p className="login__error" role="alert">
             {error}

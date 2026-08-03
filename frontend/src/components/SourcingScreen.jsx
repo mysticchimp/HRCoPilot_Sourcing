@@ -45,7 +45,8 @@ export default function SourcingScreen() {
 
   const activeRole = roles.find((r) => r.slug === activeSlug) || null;
   const activeLabel =
-    activeSlug === 'new' ? '— new role —' : activeRole?.role_name || activeSlug;
+    activeSlug === 'new' ? 'Select Role' : activeRole?.role_name || activeSlug;
+  const isPlaceholder = activeSlug === 'new';
 
   const refreshRoles = useCallback(async () => {
     try {
@@ -255,7 +256,9 @@ export default function SourcingScreen() {
           <span className="sourcing__label">Role</span>
           <button
             type="button"
-            className="role-menu__trigger"
+            className={`role-menu__trigger${
+              isPlaceholder ? ' role-menu__trigger--placeholder' : ''
+            }`}
             disabled={busy}
             aria-haspopup="listbox"
             aria-expanded={menuOpen}
@@ -268,10 +271,10 @@ export default function SourcingScreen() {
               <li>
                 <button
                   type="button"
-                  className="role-menu__item"
+                  className="role-menu__item role-menu__item--placeholder"
                   onClick={() => selectRole('new')}
                 >
-                  — new role —
+                  Select Role
                 </button>
               </li>
               {roles.map((r) => (
