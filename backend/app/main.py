@@ -15,6 +15,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logging.getLogger("sourcing.chat").setLevel(logging.INFO)
+logging.getLogger("sourcing.pull").setLevel(logging.INFO)
+logging.getLogger("sourcing.apify").setLevel(logging.INFO)
 
 
 @asynccontextmanager

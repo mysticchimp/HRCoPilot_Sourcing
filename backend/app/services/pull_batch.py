@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -18,6 +20,8 @@ from app.apify.client import (
     probe_with_relax,
 )
 from app.models import Candidate, PullBatch, Role, RoleCandidate
+
+logger = logging.getLogger("sourcing.pull")
 
 
 def _normalize_url(url: str | None) -> str | None:
@@ -144,7 +148,23 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
     pool_cap = int(retrieval.get("pool_cap") or batch_size)
     batch_size = max(1, min(int(batch_size), 150))
 
+    logger.info(
+        "pull_batch called role_id=%s slug=%s batch_size=%s pool_cap=%s "
+        "last_page=%s retrieval params for compile_retrieval: %s",
+        role_id,
+        role.slug,
+        batch_size,
+        pool_cap,
+        role.last_page,
+        json.dumps({"retrieval": retrieval}, default=str),
+    )
+
     actor_input = compile_retrieval({"retrieval": retrieval}, pool_cap)
+    logger.info(
+        "pull_batch compiled actor_input (pre-probe): %s",
+        json.dumps(actor_input, default=str),
+    )
+
     page = int(role.last_page or 0) + 1
     new_urls: list[str] = []
     pages_scanned = 0
@@ -153,6 +173,12 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
     effective_input = dict(actor_input)
     first_page = True
     max_pages = 40
+    logger.info(
+        "pull_batch start pagination page=%s seen_urls=%s max_pages=%s",
+        page,
+        len(seen),
+        max_pages,
+    )
 
     while len(new_urls) < batch_size and pages_scanned < max_pages:
         if first_page:
@@ -162,6 +188,17 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
             first_page = False
         else:
             _pool_n, preview = probe_pool(effective_input, start_page=page)
+
+        raw_preview_count = len(preview) if preview else 0
+        logger.info(
+            "pull_batch page=%s raw Apify preview count=%s pool_n=%s "
+            "(before dedup) new_urls_so_far=%s skipped_repeats=%s",
+            page,
+            raw_preview_count,
+            _pool_n,
+            len(new_urls),
+            skipped_repeats,
+        )
 
         _log_apify_call(
             db,
@@ -179,6 +216,10 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
         pages_scanned += 1
 
         if not preview:
+            logger.info(
+                "pull_batch empty preview on page=%s — stopping page scan",
+                page,
+            )
             break
 
         for item in preview:
@@ -192,16 +233,34 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
             if len(new_urls) >= batch_size:
                 break
 
+        logger.info(
+            "pull_batch after dedup page=%s new_urls=%s skipped_repeats=%s",
+            page,
+            len(new_urls),
+            skipped_repeats,
+        )
+
         if len(new_urls) >= batch_size:
             break
         page += 1
 
     target_urls = [u for u in new_urls[:batch_size] if u not in seen]
+    logger.info(
+        "pull_batch target_urls for Full enrich=%s (from new_urls=%s)",
+        len(target_urls),
+        len(new_urls),
+    )
 
     if not target_urls:
         role.last_page = page
         role.updated_at = datetime.now(timezone.utc)
         db.commit()
+        logger.info(
+            "returning 0 candidates (no new URLs after probe/dedup; "
+            "skipped_repeats=%s pages_scanned=%s)",
+            skipped_repeats,
+            pages_scanned,
+        )
         return {
             "candidates": [],
             "summary": (
@@ -214,6 +273,12 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
 
     mode = retrieval.get("profileScraperMode") or "Full"
     profiles, status, run_id = fetch_profiles_by_urls(target_urls, mode=mode)
+    logger.info(
+        "pull_batch Full enrich done run_id=%s status=%s raw profile count=%s",
+        run_id,
+        status,
+        len(profiles) if profiles else 0,
+    )
 
     batch_number = _next_batch_number(db, role_id)
     batch = _log_apify_call(
@@ -265,6 +330,14 @@ def pull_batch(db: Session, role_id: uuid.UUID, batch_size: int = 25) -> dict[st
     summary = (
         f"Pulled {len(stored)} new (skipped {skipped_repeats} repeats "
         f"across {pages_scanned} pages)."
+    )
+    logger.info(
+        "returning %s candidates batch_id=%s run_id=%s status=%s summary=%s",
+        len(stored),
+        batch.id,
+        run_id,
+        status,
+        summary,
     )
     return {
         "candidates": [_candidate_row(c) for c in stored],

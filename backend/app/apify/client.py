@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 import os
 import time
@@ -10,6 +12,8 @@ from typing import Any
 import requests
 
 from app.maps import DEFAULT_LOCATION, FUNCTION_MAP, SENIORITY_MAP, YEARS_MAP
+
+logger = logging.getLogger("sourcing.apify")
 
 ACTOR = "harvestapi~linkedin-profile-search"
 RUN_SYNC_URL = f"https://api.apify.com/v2/acts/{ACTOR}/run-sync-get-dataset-items"
@@ -82,6 +86,16 @@ def compile_retrieval(spec: dict, pool_cap: int) -> dict[str, Any]:
     return actor
 
 
+def _apify_header(headers: Any, *names: str) -> str | None:
+    """Case-insensitive lookup across common Apify response header spellings."""
+    lower = {str(k).lower(): v for k, v in headers.items()}
+    for name in names:
+        v = lower.get(name.lower())
+        if v:
+            return str(v)
+    return None
+
+
 def probe_pool(actor_input: dict, start_page: int = 1) -> tuple[int | None, list]:
     """Cheap pre-flight: ONE search page in Short mode.
 
@@ -93,11 +107,25 @@ def probe_pool(actor_input: dict, start_page: int = 1) -> tuple[int | None, list
     probe["takePages"] = 1
     probe["startPage"] = max(1, int(start_page))
     probe.pop("maxItems", None)
+    logger.info(
+        "probe_pool sending actor input payload: %s",
+        json.dumps(probe, default=str),
+    )
     r = requests.post(
         RUN_SYNC_URL, params={"token": _token()}, json=probe, timeout=180
     )
+    run_id = _apify_header(
+        r.headers, "x-apify-run-id", "X-Apify-Run-Id", "x-apify-actor-run-id"
+    )
+    http_status = r.status_code
+    logger.info(
+        "probe_pool Apify response http_status=%s run_id=%s",
+        http_status,
+        run_id or "(none in headers; sync endpoint)",
+    )
     r.raise_for_status()
     items = r.json() or []
+    raw_count = len(items) if isinstance(items, list) else 0
     count = None
     if items:
         count = (
@@ -105,6 +133,16 @@ def probe_pool(actor_input: dict, start_page: int = 1) -> tuple[int | None, list
                 "totalElements"
             )
         )
+    # Sync endpoint has no separate run status field — HTTP 200 => SUCCEEDED.
+    logger.info(
+        "probe_pool raw dataset item count=%s pool_n(totalElements)=%s "
+        "status=%s run_id=%s startPage=%s",
+        raw_count,
+        count,
+        "SUCCEEDED" if http_status == 200 else f"HTTP_{http_status}",
+        run_id or "(sync/unknown)",
+        probe.get("startPage"),
+    )
     return count, items
 
 
@@ -117,13 +155,41 @@ def probe_with_relax(
     original input is unchanged; caller gets the relaxed input for later pages.
     """
     working = dict(actor_input)
+    logger.info(
+        "probe_with_relax start start_page=%s actor_input=%s",
+        start_page,
+        json.dumps(working, default=str),
+    )
     pool_n, preview = probe_pool(working, start_page=start_page)
+    logger.info(
+        "probe_with_relax initial result pool_n=%s preview_len=%s",
+        pool_n,
+        len(preview) if preview else 0,
+    )
     for key in RELAX_ORDER:
         if preview:
             break
         if key in working:
-            working.pop(key)
+            dropped = working.pop(key)
+            logger.info(
+                "probe_with_relax relaxing drop key=%s value=%s remaining=%s",
+                key,
+                json.dumps(dropped, default=str),
+                json.dumps(working, default=str),
+            )
             pool_n, preview = probe_pool(working, start_page=start_page)
+            logger.info(
+                "probe_with_relax after drop %s: pool_n=%s preview_len=%s",
+                key,
+                pool_n,
+                len(preview) if preview else 0,
+            )
+    logger.info(
+        "probe_with_relax done pool_n=%s preview_len=%s effective_input=%s",
+        pool_n,
+        len(preview) if preview else 0,
+        json.dumps(working, default=str),
+    )
     return pool_n, preview, working
 
 
@@ -135,6 +201,10 @@ def fetch_profiles(
     Returns (items, status, run_id).
     """
     token = _token()
+    logger.info(
+        "fetch_profiles sending actor input payload: %s",
+        json.dumps(actor_input, default=str),
+    )
     r = requests.post(
         f"https://api.apify.com/v2/acts/{ACTOR}/runs",
         params={"token": token},
@@ -144,6 +214,12 @@ def fetch_profiles(
     r.raise_for_status()
     run = r.json()["data"]
     run_id, dataset_id = run["id"], run["defaultDatasetId"]
+    logger.info(
+        "fetch_profiles started run_id=%s dataset_id=%s initial_status=%s",
+        run_id,
+        dataset_id,
+        run.get("status"),
+    )
 
     waited = 0
     status = "RUNNING"
@@ -165,7 +241,14 @@ def fetch_profiles(
         params={"token": token, "clean": "true", "format": "json"},
         timeout=180,
     ).json()
-    return items or [], status, run_id
+    raw = items or []
+    logger.info(
+        "fetch_profiles finished run_id=%s status=%s raw dataset item count=%s",
+        run_id,
+        status,
+        len(raw) if isinstance(raw, list) else 0,
+    )
+    return raw, status, run_id
 
 
 def fetch_profiles_by_urls(
