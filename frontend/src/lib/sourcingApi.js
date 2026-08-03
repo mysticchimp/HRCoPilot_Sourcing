@@ -2,8 +2,32 @@ const API_BASE =
   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SOURCING_API_URL) ||
   '/api';
 
+const TOKEN_KEY = 'sourcing_access_token';
+
+export function getAccessToken() {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setAccessToken(token) {
+  try {
+    if (token) sessionStorage.setItem(TOKEN_KEY, token);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* private mode / blocked storage */
+  }
+}
+
+export function clearAccessToken() {
+  setAccessToken(null);
+}
+
 async function request(path, options = {}) {
   const { headers, ...rest } = options;
+  const token = getAccessToken();
   let res;
   try {
     res = await fetch(`${API_BASE}${path}`, {
@@ -11,6 +35,7 @@ async function request(path, options = {}) {
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(headers || {}),
       },
     });

@@ -4,7 +4,7 @@ import { useAuth } from '../lib/auth';
 import { login as apiLogin } from '../lib/sourcingApi';
 
 export default function LoginPage() {
-  const { user, setUser, loading } = useAuth();
+  const { user, loginSuccess, loading } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -21,7 +21,7 @@ export default function LoginPage() {
     setError(null);
     try {
       const me = await apiLogin(email.trim(), password);
-      setUser(me);
+      loginSuccess(me);
       navigate('/sourcing', { replace: true });
     } catch (err) {
       setError(err.message || 'Login failed');

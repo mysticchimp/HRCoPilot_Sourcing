@@ -1,4 +1,4 @@
-"""Dummy login — any non-empty email/password works. Nothing stored."""
+"""Dummy login — any non-empty email/password works. Nothing stored in DB."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
-from fastapi import Cookie, HTTPException, Response, status
+from fastapi import Cookie, Header, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -24,6 +24,7 @@ class LoginIn(BaseModel):
 class UserOut(BaseModel):
     email: str
     role: str
+    access_token: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -77,15 +78,8 @@ def decode_token(token: str) -> dict:
         ) from e
 
 
-def get_current_user(
-    access_token: Optional[str] = Cookie(default=None, alias=COOKIE_NAME),
-) -> CurrentUser:
-    if not access_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-        )
-    payload = decode_token(access_token)
+def _user_from_token(token: str) -> CurrentUser:
+    payload = decode_token(token)
     email = payload.get("email")
     role = payload.get("role") or "admin"
     if not email:
@@ -96,5 +90,23 @@ def get_current_user(
     return CurrentUser(email=str(email), role=str(role))
 
 
-def user_to_out(user: CurrentUser) -> UserOut:
-    return UserOut(email=user.email, role=user.role)
+def get_current_user(
+    access_token: Optional[str] = Cookie(default=None, alias=COOKIE_NAME),
+    authorization: Optional[str] = Header(default=None),
+) -> CurrentUser:
+    # Prefer Bearer — cookies often don't travel Vercel → Render cross-site.
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    elif access_token:
+        token = access_token
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+    return _user_from_token(token)
+
+
+def user_to_out(user: CurrentUser, access_token: Optional[str] = None) -> UserOut:
+    return UserOut(email=user.email, role=user.role, access_token=access_token)

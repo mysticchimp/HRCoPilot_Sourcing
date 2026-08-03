@@ -1,4 +1,4 @@
-"""Login / logout / me — accept any credentials, issue a session cookie."""
+"""Login / logout / me — dummy credentials; JWT in body + optional cookie."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def login(body: LoginIn, response: Response):
     user = CurrentUser(email=email, role="admin")
     token = create_access_token(user.email, user.role)
     set_auth_cookie(response, token)
-    return user_to_out(user)
+    return user_to_out(user, access_token=token)
 
 
 @router.post("/logout")

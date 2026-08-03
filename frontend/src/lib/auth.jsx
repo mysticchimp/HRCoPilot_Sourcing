@@ -1,5 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { fetchMe, logout as apiLogout } from '../lib/sourcingApi';
+import {
+  clearAccessToken,
+  fetchMe,
+  logout as apiLogout,
+  setAccessToken,
+} from './sourcingApi';
 
 const AuthContext = createContext(null);
 
@@ -13,6 +18,7 @@ export function AuthProvider({ children }) {
       setUser(me);
       return me;
     } catch {
+      clearAccessToken();
       setUser(null);
       return null;
     } finally {
@@ -24,17 +30,25 @@ export function AuthProvider({ children }) {
     refresh();
   }, [refresh]);
 
+  const loginSuccess = useCallback((me) => {
+    if (me?.access_token) setAccessToken(me.access_token);
+    setUser(me);
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       await apiLogout();
     } catch {
-      /* cookie cleared server-side or already gone */
+      /* ignore */
     }
+    clearAccessToken();
     setUser(null);
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, setUser, loading, refresh, logout }}>
+    <AuthContext.Provider
+      value={{ user, setUser, loginSuccess, loading, refresh, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );
