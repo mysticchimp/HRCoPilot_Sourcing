@@ -2,7 +2,7 @@ services:
   - type: web
     name: contra6-sourcing-api
     runtime: python
-    plan: starter
+    plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
@@ -22,4 +22,4 @@ services:
 
 databases:
   - name: contra6-sourcing-db
-    plan: basic-256mb
+    plan: free
