@@ -118,10 +118,13 @@ def probe_pool(actor_input: dict, start_page: int = 1) -> tuple[int | None, list
         r.headers, "x-apify-run-id", "X-Apify-Run-Id", "x-apify-actor-run-id"
     )
     http_status = r.status_code
+    pagination_total = _apify_header(r.headers, "x-apify-pagination-total")
     logger.info(
-        "probe_pool Apify response http_status=%s run_id=%s",
+        "probe_pool Apify response http_status=%s run_id=%s "
+        "X-Apify-Pagination-Total=%s",
         http_status,
         run_id or "(none in headers; sync endpoint)",
+        pagination_total,
     )
     r.raise_for_status()
     items = r.json() or []
@@ -133,14 +136,40 @@ def probe_pool(actor_input: dict, start_page: int = 1) -> tuple[int | None, list
                 "totalElements"
             )
         )
-    # Sync endpoint has no separate run status field — HTTP 200 => SUCCEEDED.
+    # Sync endpoint has no separate run status field — HTTP 2xx => request ok.
+    # When the dataset is empty, look up the latest actor run for statusMessage
+    # (e.g. free-tier limits that still return HTTP 201 + []).
+    status_message = None
+    latest_run_id = run_id
+    latest_status = "SUCCEEDED" if 200 <= http_status < 300 else f"HTTP_{http_status}"
+    if raw_count == 0:
+        try:
+            rr = requests.get(
+                f"https://api.apify.com/v2/acts/{ACTOR}/runs",
+                params={"token": _token(), "limit": 1, "desc": 1},
+                timeout=30,
+            )
+            if rr.ok:
+                latest = ((rr.json().get("data") or {}).get("items") or [None])[0]
+                if latest:
+                    latest_run_id = latest.get("id") or latest_run_id
+                    latest_status = latest.get("status") or latest_status
+                    info = requests.get(
+                        f"https://api.apify.com/v2/actor-runs/{latest_run_id}",
+                        params={"token": _token()},
+                        timeout=30,
+                    ).json().get("data") or {}
+                    status_message = info.get("statusMessage")
+        except Exception as e:  # noqa: BLE001 — best-effort diagnostics only
+            logger.info("probe_pool could not fetch latest run statusMessage: %s", e)
     logger.info(
         "probe_pool raw dataset item count=%s pool_n(totalElements)=%s "
-        "status=%s run_id=%s startPage=%s",
+        "status=%s statusMessage=%s run_id=%s startPage=%s",
         raw_count,
         count,
-        "SUCCEEDED" if http_status == 200 else f"HTTP_{http_status}",
-        run_id or "(sync/unknown)",
+        latest_status,
+        status_message,
+        latest_run_id or "(sync/unknown)",
         probe.get("startPage"),
     )
     return count, items
@@ -236,6 +265,7 @@ def fetch_profiles(
         time.sleep(poll_every)
         waited += poll_every
 
+    status_message = info.get("statusMessage")
     items = requests.get(
         f"https://api.apify.com/v2/datasets/{dataset_id}/items",
         params={"token": token, "clean": "true", "format": "json"},
@@ -243,9 +273,11 @@ def fetch_profiles(
     ).json()
     raw = items or []
     logger.info(
-        "fetch_profiles finished run_id=%s status=%s raw dataset item count=%s",
+        "fetch_profiles finished run_id=%s status=%s statusMessage=%s "
+        "raw dataset item count=%s",
         run_id,
         status,
+        status_message,
         len(raw) if isinstance(raw, list) else 0,
     )
     return raw, status, run_id
