@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import RolePicker from './RolePicker';
+import { useRole } from '../lib/roleContext';
 import {
-  archiveRole,
   fetchRoleCandidates,
-  listRoles,
   sendChatMessage,
   startSession,
 } from '../lib/sourcingApi';
@@ -27,8 +27,15 @@ function ExternalLinkIcon() {
 }
 
 export default function SourcingScreen() {
-  const [roles, setRoles] = useState([]);
-  const [activeSlug, setActiveSlug] = useState('new');
+  const {
+    activeSlug,
+    selectRole,
+    refreshRoles,
+    archiveRole,
+    error: roleError,
+    setError: setRoleError,
+  } = useRole();
+
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [candidates, setCandidates] = useState([]);
@@ -37,25 +44,13 @@ export default function SourcingScreen() {
   const [error, setError] = useState(null);
   const [summary, setSummary] = useState(null);
   const [chatWidth, setChatWidth] = useState(CHAT_DEFAULT);
-  const [menuOpen, setMenuOpen] = useState(false);
   const threadRef = useRef(null);
   const inputRef = useRef(null);
-  const menuRef = useRef(null);
   const dragRef = useRef({ active: false, startX: 0, startW: CHAT_DEFAULT });
+  const bootstrappedFor = useRef(undefined);
 
-  const activeRole = roles.find((r) => r.slug === activeSlug) || null;
-  const activeLabel =
-    activeSlug === 'new' ? 'Select Role' : activeRole?.role_name || activeSlug;
-  const isPlaceholder = activeSlug === 'new';
-
-  const refreshRoles = useCallback(async () => {
-    try {
-      const data = await listRoles();
-      setRoles(Array.isArray(data) ? data : []);
-    } catch (err) {
-      setError(err.message);
-    }
-  }, []);
+  const chatSlug = activeSlug || 'new';
+  const displayError = error || roleError;
 
   const loadCandidates = useCallback(async (slug) => {
     if (!slug || slug === 'new') {
@@ -70,21 +65,28 @@ export default function SourcingScreen() {
     }
   }, []);
 
-  const applySessionMeta = useCallback((data) => {
-    if (data.session_id) setSessionId(data.session_id);
-    if (data.role_slug) {
-      setActiveSlug(data.role_slug === 'new' || !data.role_slug ? 'new' : data.role_slug);
-    }
-  }, []);
+  const applySessionMeta = useCallback(
+    (data) => {
+      if (data.session_id) setSessionId(data.session_id);
+      if (data.role_slug) {
+        const next =
+          data.role_slug === 'new' || !data.role_slug ? null : data.role_slug;
+        selectRole(next);
+      }
+    },
+    [selectRole],
+  );
 
   const bootstrapSession = useCallback(
     async (slug) => {
+      const target = slug || 'new';
       setBusy(true);
       setError(null);
+      setRoleError(null);
       setSummary(null);
       setSessionId(null);
       try {
-        const data = await startSession(slug);
+        const data = await startSession(target);
         applySessionMeta(data);
         setMessages(
           data.assistant_message
@@ -92,7 +94,8 @@ export default function SourcingScreen() {
             : [],
         );
         if (data.candidates) setCandidates(data.candidates);
-        else if (data.role_slug && data.role_slug !== 'new') await loadCandidates(data.role_slug);
+        else if (data.role_slug && data.role_slug !== 'new')
+          await loadCandidates(data.role_slug);
         else setCandidates([]);
         await refreshRoles();
       } catch (err) {
@@ -101,13 +104,16 @@ export default function SourcingScreen() {
         setBusy(false);
       }
     },
-    [applySessionMeta, loadCandidates, refreshRoles],
+    [applySessionMeta, loadCandidates, refreshRoles, setRoleError],
   );
 
+  // Bootstrap chat when the shared role selection changes (including first mount).
   useEffect(() => {
-    refreshRoles();
-    bootstrapSession('new');
-  }, [bootstrapSession, refreshRoles]);
+    const key = activeSlug || 'new';
+    if (bootstrappedFor.current === key) return;
+    bootstrappedFor.current = key;
+    bootstrapSession(key);
+  }, [activeSlug, bootstrapSession]);
 
   useEffect(() => {
     if (threadRef.current) {
@@ -115,8 +121,6 @@ export default function SourcingScreen() {
     }
   }, [messages, busy]);
 
-  // Re-focus after send + after the assistant reply renders. The input is
-  // disabled while busy, which drops focus; restore it once busy clears.
   useEffect(() => {
     if (!busy && inputRef.current) {
       inputRef.current.focus();
@@ -147,17 +151,6 @@ export default function SourcingScreen() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!menuOpen) return undefined;
-    const onDoc = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) {
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [menuOpen]);
-
   const handleResizeStart = (e) => {
     e.preventDefault();
     dragRef.current = { active: true, startX: e.clientX, startW: chatWidth };
@@ -165,34 +158,22 @@ export default function SourcingScreen() {
     document.body.style.userSelect = 'none';
   };
 
-  const selectRole = (slug) => {
-    setMenuOpen(false);
-    setActiveSlug(slug);
-    bootstrapSession(slug);
+  const handleRoleSelect = (slug) => {
+    bootstrappedFor.current = undefined;
+    selectRole(slug);
   };
 
   const handleNewRole = () => {
-    setMenuOpen(false);
-    setActiveSlug('new');
-    bootstrapSession('new');
+    bootstrappedFor.current = undefined;
+    selectRole(null);
   };
 
-  const handleArchive = async (role, e) => {
-    e.stopPropagation();
-    const ok = window.confirm(
-      `Archive ${role.role_name}? You can restore it later from Archived Roles.`,
-    );
-    if (!ok) return;
+  const handleArchive = async (role) => {
     setError(null);
+    setRoleError(null);
     try {
-      await archiveRole(role.slug);
-      setMenuOpen(false);
-      if (activeSlug === role.slug) {
-        setActiveSlug('new');
-        await bootstrapSession('new');
-      } else {
-        await refreshRoles();
-      }
+      bootstrappedFor.current = undefined;
+      await archiveRole(role);
     } catch (err) {
       setError(err.message);
     }
@@ -209,8 +190,10 @@ export default function SourcingScreen() {
     setError(null);
 
     try {
-      const slug = activeSlug || 'new';
-      const data = await sendChatMessage(slug, text, sessionId);
+      const data = await sendChatMessage(chatSlug, text, sessionId);
+      if (data.role_slug && data.role_slug !== 'new') {
+        bootstrappedFor.current = data.role_slug;
+      }
       applySessionMeta(data);
       if (data.assistant_message) {
         setMessages((prev) => [
@@ -252,61 +235,12 @@ export default function SourcingScreen() {
       <header className="sourcing__toolbar">
         <div className="sourcing__brand">Sourcing</div>
 
-        <div className="sourcing__role-picker" ref={menuRef}>
-          <span className="sourcing__label">Role</span>
-          <button
-            type="button"
-            className={`role-menu__trigger${
-              isPlaceholder ? ' role-menu__trigger--placeholder' : ''
-            }`}
-            disabled={busy}
-            aria-haspopup="listbox"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((o) => !o)}
-          >
-            {activeLabel}
-          </button>
-          {menuOpen && (
-            <ul className="role-menu" role="listbox">
-              <li>
-                <button
-                  type="button"
-                  className="role-menu__item role-menu__item--placeholder"
-                  onClick={() => selectRole('new')}
-                >
-                  Select Role
-                </button>
-              </li>
-              {roles.map((r) => (
-                <li key={r.slug} className="role-menu__row">
-                  <button
-                    type="button"
-                    className={`role-menu__item${
-                      r.slug === activeSlug ? ' role-menu__item--active' : ''
-                    }`}
-                    onClick={() => selectRole(r.slug)}
-                  >
-                    {r.role_name}
-                  </button>
-                  <button
-                    type="button"
-                    className="role-menu__archive"
-                    aria-label={`Archive ${r.role_name}`}
-                    title="Archive role"
-                    onClick={(e) => handleArchive(r, e)}
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {activeRole && (
-            <span className="sourcing__role-id mono" title={activeRole.id}>
-              ID: {activeRole.id}
-            </span>
-          )}
-        </div>
+        <RolePicker
+          allowNew
+          busy={busy}
+          onSelect={handleRoleSelect}
+          onArchive={handleArchive}
+        />
 
         <button
           type="button"
@@ -322,9 +256,9 @@ export default function SourcingScreen() {
         {summary && <p className="sourcing__summary mono">{summary}</p>}
       </header>
 
-      {error && (
+      {displayError && (
         <p className="sourcing__error" role="alert">
-          {error}
+          {displayError}
         </p>
       )}
 

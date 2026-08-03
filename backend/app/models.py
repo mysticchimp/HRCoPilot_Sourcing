@@ -6,8 +6,10 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from decimal import Decimal
+
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -22,6 +24,7 @@ class Role(Base):
     client: Mapped[Optional[str]] = mapped_column(Text)
     retrieval: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     last_page: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    jd_text: Mapped[Optional[str]] = mapped_column(Text)
     archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -72,6 +75,11 @@ class RoleCandidate(Base):
     # Snapshot of roles.role_name at search/pull time — readability only, not for lookups.
     role_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
     pulled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    total_score: Mapped[Optional[Decimal]] = mapped_column(Numeric)
+    component_breakdown: Mapped[Optional[dict]] = mapped_column(JSONB)
+    matched_signals: Mapped[Optional[list]] = mapped_column(ARRAY(Text))
+    reasoning: Mapped[Optional[str]] = mapped_column(Text)
+    scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
 class ChatSession(Base):

@@ -113,3 +113,18 @@ export function sendChatMessage(roleSlug, message, sessionId = null) {
 export function fetchRoleCandidates(slug) {
   return request(`/roles/${encodeURIComponent(slug)}/candidates`);
 }
+
+export function saveRoleJd(slug, jd_text) {
+  return request(`/roles/${encodeURIComponent(slug)}/jd`, {
+    method: 'POST',
+    body: JSON.stringify({ jd_text }),
+  });
+}
+
+export function scoreRole(slug) {
+  return request(`/roles/${encodeURIComponent(slug)}/score`, { method: 'POST' });
+}
+
+export function fetchRoleScores(slug) {
+  return request(`/roles/${encodeURIComponent(slug)}/scores`);
+}

@@ -5,6 +5,7 @@ import LoginPage from './components/LoginPage';
 import ScoringScreen from './components/ScoringScreen';
 import SourcingScreen from './components/SourcingScreen';
 import { AuthProvider } from './lib/auth';
+import { RoleProvider } from './lib/roleContext';
 
 export default function App() {
   return (
@@ -12,7 +13,13 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route element={<AppShell />}>
+          <Route
+            element={
+              <RoleProvider>
+                <AppShell />
+              </RoleProvider>
+            }
+          >
             <Route index element={<Navigate to="/sourcing" replace />} />
             <Route path="/sourcing" element={<SourcingScreen />} />
             <Route path="/sourcing/archived" element={<ArchivedRolesView />} />

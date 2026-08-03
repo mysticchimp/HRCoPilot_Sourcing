@@ -18,6 +18,7 @@ logging.basicConfig(
 logging.getLogger("sourcing.chat").setLevel(logging.INFO)
 logging.getLogger("sourcing.pull").setLevel(logging.INFO)
 logging.getLogger("sourcing.apify").setLevel(logging.INFO)
+logging.getLogger("sourcing.scoring").setLevel(logging.INFO)
 
 
 @asynccontextmanager

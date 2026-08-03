@@ -42,6 +42,10 @@ class Settings:
             "true",
             "yes",
         )
+        self.scoring_api_url = os.environ.get(
+            "SCORING_API_URL",
+            "https://contra6-scoring-api.onrender.com",
+        ).rstrip("/")
 
 
 @lru_cache

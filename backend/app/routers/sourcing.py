@@ -13,7 +13,9 @@ from app.auth import get_current_user
 from app.db import get_db
 from app.models import Role
 from app.services import chat as chat_service
+from app.services import scoring as scoring_service
 from app.services.pull_batch import list_role_candidates, pull_batch
+from app.services.scoring import ScoringTransientError
 
 router = APIRouter(tags=["sourcing"])
 protected = APIRouter(dependencies=[Depends(get_current_user)])
@@ -28,6 +30,10 @@ class PullIn(BaseModel):
     batch_size: Optional[int] = Field(default=None, ge=10, le=150)
 
 
+class JdIn(BaseModel):
+    jd_text: str = Field(min_length=1)
+
+
 class RoleOut(BaseModel):
     id: str
     slug: str
@@ -36,6 +42,7 @@ class RoleOut(BaseModel):
     last_page: int
     pool_cap: Optional[int] = None
     archived_at: Optional[str] = None
+    has_jd: bool = False
 
 
 def _role_out(r: Role) -> RoleOut:
@@ -47,6 +54,7 @@ def _role_out(r: Role) -> RoleOut:
         last_page=r.last_page,
         pool_cap=(r.retrieval or {}).get("pool_cap"),
         archived_at=r.archived_at.isoformat() if r.archived_at else None,
+        has_jd=bool((r.jd_text or "").strip()),
     )
 
 
@@ -138,6 +146,57 @@ def chat_message(role_slug: str, body: MessageIn, db: Session = Depends(get_db))
 def get_candidates(slug: str, db: Session = Depends(get_db)):
     role = _get_role_by_slug(db, slug)
     return {"role": role.slug, "candidates": list_role_candidates(db, role.id)}
+
+
+@protected.post("/roles/{slug}/jd")
+def save_role_jd(slug: str, body: JdIn, db: Session = Depends(get_db)):
+    role = _get_role_by_slug(db, slug)
+    try:
+        role = scoring_service.save_role_jd(db, role, body.jd_text)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "ok": True,
+        "role": role.slug,
+        "jd_text": role.jd_text,
+        "has_jd": True,
+    }
+
+
+@protected.post("/roles/{slug}/score")
+def score_role(slug: str, db: Session = Depends(get_db)):
+    role = _get_role_by_slug(db, slug)
+    try:
+        cards = scoring_service.score_role(db, role)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ScoringTransientError as e:
+        raise HTTPException(status_code=503, detail=e.message) from None
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong on our side — please try again.",
+        ) from None
+    return {
+        "role": role.slug,
+        "jd_text": role.jd_text,
+        "has_jd": bool((role.jd_text or "").strip()),
+        "candidates": cards,
+        "count": len(cards),
+    }
+
+
+@protected.get("/roles/{slug}/scores")
+def get_scores(slug: str, db: Session = Depends(get_db)):
+    role = _get_role_by_slug(db, slug)
+    cards = scoring_service.list_scored_candidates(db, role.id)
+    return {
+        "role": role.slug,
+        "jd_text": role.jd_text,
+        "has_jd": bool((role.jd_text or "").strip()),
+        "candidates": cards,
+        "count": len(cards),
+    }
 
 
 @protected.post("/roles/{slug}/pull")

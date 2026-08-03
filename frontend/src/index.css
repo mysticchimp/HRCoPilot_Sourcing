@@ -252,7 +252,50 @@ body {
   font-size: 12px;
 }
 
-.scoring-placeholder {
+.scoring {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.scoring__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+  padding: 0.875rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+
+.scoring__brand {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.scoring__jd-badge {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--good);
+}
+
+.scoring__error {
+  margin: 0;
+  padding: 0.65rem 1.25rem;
+  background: var(--crit-bg);
+  color: var(--crit);
+  font-size: 0.875rem;
+  border-bottom: 1px solid rgba(255, 90, 95, 0.25);
+}
+
+.scoring__empty {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -263,25 +306,201 @@ body {
   text-align: center;
 }
 
-.scoring-placeholder__title {
+.scoring__empty-title {
   margin: 0;
   font-size: clamp(1.25rem, 2.5vw, 1.75rem);
   font-weight: 500;
   letter-spacing: -0.03em;
 }
 
-.scoring-placeholder__title .it {
+.scoring__empty-title .it {
   font-family: var(--font-display);
   font-style: italic;
   font-weight: 400;
   color: var(--accent);
 }
 
-.scoring-placeholder__body {
+.scoring__empty-body {
   margin: 0;
-  max-width: 24rem;
+  max-width: 28rem;
   font-size: 0.9375rem;
   color: var(--ink-2);
+}
+
+.scoring__status {
+  margin: 0;
+  padding: 1rem 1.25rem;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+}
+
+.scoring__jd,
+.scoring__ready,
+.scoring__results {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.25rem;
+}
+
+.scoring__section-title {
+  margin: 0 0 0.35rem;
+  font-size: 1.125rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.scoring__section-body {
+  margin: 0 0 1rem;
+  max-width: 40rem;
+  color: var(--ink-2);
+  font-size: 0.9375rem;
+}
+
+.scoring__jd-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.85rem;
+  max-width: 48rem;
+}
+
+.scoring__jd-input {
+  width: 100%;
+  min-height: 16rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line-2);
+  background: var(--bg-3);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.scoring__jd-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.scoring__jd-input:disabled {
+  opacity: 0.55;
+}
+
+.scoring__results-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.scoring__results-count {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.scoring__cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 52rem;
+}
+
+.score-card {
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  background: rgba(17, 17, 28, 0.72);
+}
+
+.score-card__top {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+}
+
+.score-card__identity {
+  flex: 1;
+  min-width: 0;
+}
+
+.score-card__name {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.score-card__title {
+  margin: 0.2rem 0 0;
+  font-size: 0.875rem;
+  color: var(--ink-2);
+}
+
+.score-card__score {
+  flex-shrink: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: var(--accent);
+  letter-spacing: -0.02em;
+}
+
+.score-card__link {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.score-card__link:hover {
+  color: var(--accent);
+}
+
+.score-card__signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.score-card__signal {
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--line-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+}
+
+.score-card__reasoning {
+  margin-top: 0.75rem;
+}
+
+.score-card__reasoning-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.score-card__reasoning-toggle:hover {
+  text-decoration: underline;
+}
+
+.score-card__reasoning-body {
+  margin: 0.5rem 0 0;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 .archived {
