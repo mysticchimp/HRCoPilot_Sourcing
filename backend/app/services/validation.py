@@ -28,16 +28,31 @@ SENTENCE_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
+# Strip markdown list markers users copy-paste from option lists (·, -, *, 1.)
+_LIST_PREFIX = re.compile(
+    r"^(?:[\s\u00b7\u2022\-\*]+|\d+[\.\)]\s*)+",
+)
+
+
+def clean_answer(raw: str) -> str:
+    """Strip list/bullet prefixes and surrounding whitespace from a reply token."""
+    s = (raw or "").strip()
+    s = _LIST_PREFIX.sub("", s).strip()
+    # Also strip accidental wrapping quotes
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    return s
+
 
 def resolve_function(raw: str) -> str | None:
     """Exact closed-set match (case-insensitive) against FUNCTION_MAP keys."""
-    key = raw.strip().lower()
+    key = clean_answer(raw).lower()
     return key if key in FUNCTION_MAP else None
 
 
 def resolve_years_tokens(raw: str) -> tuple[list[str] | None, list[str]]:
     """Parse comma-separated YoE tokens. Returns (canonical_labels, invalid_tokens)."""
-    tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    tokens = [clean_answer(t) for t in raw.split(",") if clean_answer(t)]
     if not tokens:
         return None, ["(empty)"]
     valid: list[str] = []
@@ -57,7 +72,6 @@ def resolve_years_tokens(raw: str) -> tuple[list[str] | None, list[str]]:
     if invalid:
         return None, invalid
     return valid, []
-
 
 def find_nationality_hit(text: str) -> str | None:
     """Return the matched nationality/demonym token, or None."""

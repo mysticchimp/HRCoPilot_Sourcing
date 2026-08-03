@@ -1,5 +1,6 @@
 """Contra6 Sourcing API — FastAPI entrypoint for Render Web Service."""
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,6 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import run_migrations
 from app.routers.sourcing import router
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logging.getLogger("sourcing.chat").setLevel(logging.INFO)
 
 
 @asynccontextmanager

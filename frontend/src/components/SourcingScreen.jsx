@@ -6,6 +6,10 @@ import {
   startSession,
 } from '../lib/sourcingApi';
 
+const CHAT_MIN = 240;
+const CHAT_MAX = 600;
+const CHAT_DEFAULT = 280;
+
 function ExternalLinkIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -23,13 +27,16 @@ function ExternalLinkIcon() {
 export default function SourcingScreen() {
   const [roles, setRoles] = useState([]);
   const [activeSlug, setActiveSlug] = useState('new');
+  const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [candidates, setCandidates] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [summary, setSummary] = useState(null);
+  const [chatWidth, setChatWidth] = useState(CHAT_DEFAULT);
   const threadRef = useRef(null);
+  const dragRef = useRef({ active: false, startX: 0, startW: CHAT_DEFAULT });
 
   const refreshRoles = useCallback(async () => {
     try {
@@ -53,22 +60,29 @@ export default function SourcingScreen() {
     }
   }, []);
 
+  const applySessionMeta = useCallback((data) => {
+    if (data.session_id) setSessionId(data.session_id);
+    if (data.role_slug) {
+      setActiveSlug(data.role_slug === 'new' || !data.role_slug ? 'new' : data.role_slug);
+    }
+  }, []);
+
   const bootstrapSession = useCallback(
     async (slug) => {
       setBusy(true);
       setError(null);
       setSummary(null);
+      setSessionId(null);
       try {
         const data = await startSession(slug);
-        const nextSlug = data.role_slug || slug;
-        setActiveSlug(nextSlug === 'new' || !nextSlug ? 'new' : nextSlug);
+        applySessionMeta(data);
         setMessages(
           data.assistant_message
             ? [{ role: 'assistant', content: data.assistant_message }]
             : [],
         );
         if (data.candidates) setCandidates(data.candidates);
-        else if (nextSlug && nextSlug !== 'new') await loadCandidates(nextSlug);
+        else if (data.role_slug && data.role_slug !== 'new') await loadCandidates(data.role_slug);
         else setCandidates([]);
         await refreshRoles();
       } catch (err) {
@@ -77,7 +91,7 @@ export default function SourcingScreen() {
         setBusy(false);
       }
     },
-    [loadCandidates, refreshRoles],
+    [applySessionMeta, loadCandidates, refreshRoles],
   );
 
   useEffect(() => {
@@ -90,6 +104,37 @@ export default function SourcingScreen() {
       threadRef.current.scrollTop = threadRef.current.scrollHeight;
     }
   }, [messages, busy]);
+
+  useEffect(() => {
+    const onMove = (e) => {
+      if (!dragRef.current.active) return;
+      const delta = e.clientX - dragRef.current.startX;
+      const next = Math.min(
+        CHAT_MAX,
+        Math.max(CHAT_MIN, dragRef.current.startW + delta),
+      );
+      setChatWidth(next);
+    };
+    const onUp = () => {
+      if (!dragRef.current.active) return;
+      dragRef.current.active = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
+  const handleResizeStart = (e) => {
+    e.preventDefault();
+    dragRef.current = { active: true, startX: e.clientX, startW: chatWidth };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
 
   const handleRoleChange = (e) => {
     const slug = e.target.value;
@@ -114,10 +159,8 @@ export default function SourcingScreen() {
 
     try {
       const slug = activeSlug || 'new';
-      const data = await sendChatMessage(slug, text);
-      if (data.role_slug && data.role_slug !== activeSlug) {
-        setActiveSlug(data.role_slug);
-      }
+      const data = await sendChatMessage(slug, text, sessionId);
+      applySessionMeta(data);
       if (data.assistant_message) {
         setMessages((prev) => [
           ...prev,
@@ -191,7 +234,11 @@ export default function SourcingScreen() {
       )}
 
       <div className="sourcing__panes">
-        <section className="sourcing__chat" aria-label="Sourcing chat">
+        <section
+          className="sourcing__chat"
+          aria-label="Sourcing chat"
+          style={{ width: chatWidth, flexBasis: chatWidth }}
+        >
           <div className="sourcing__thread" ref={threadRef}>
             {messages.map((m, i) => (
               <div
@@ -221,6 +268,17 @@ export default function SourcingScreen() {
             </button>
           </form>
         </section>
+
+        <div
+          className="sourcing__resize"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize chat panel"
+          aria-valuemin={CHAT_MIN}
+          aria-valuemax={CHAT_MAX}
+          aria-valuenow={chatWidth}
+          onMouseDown={handleResizeStart}
+        />
 
         <section className="sourcing__results" aria-label="Pulled candidates">
           <div className="sourcing__results-head">

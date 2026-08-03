@@ -31,10 +31,12 @@ export function startSession(slug = 'new') {
   return request(`/roles/${encodeURIComponent(slug)}/session`, { method: 'POST' });
 }
 
-export function sendChatMessage(roleSlug, message) {
+export function sendChatMessage(roleSlug, message, sessionId = null) {
+  const body = { message };
+  if (sessionId) body.session_id = sessionId;
   return request(`/chat/${encodeURIComponent(roleSlug)}/message`, {
     method: 'POST',
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(body),
   });
 }
 

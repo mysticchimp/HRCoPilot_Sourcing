@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.apify.client import compile_retrieval
 from app.maps import (
@@ -21,11 +23,14 @@ from app.services import llm
 from app.services.pull_batch import list_role_candidates, pull_batch
 from app.services.validation import (
     check_titles_nationality,
+    clean_answer,
     find_nationality_hit,
     resolve_function,
     resolve_years_tokens,
     validate_anchor,
 )
+
+logger = logging.getLogger("sourcing.chat")
 
 # Intake step keys in fixed order (after role_name turn)
 INTAKE_STEPS = [
@@ -53,6 +58,11 @@ ANCHOR_BLANK_LINE = (
     "                                                       the whole UAE returns\n"
     "                                                       thousands)"
 )
+
+
+def _plain(text: str) -> str:
+    """Strip markdown bold markers — chat UI renders plain text."""
+    return text.replace("**", "")
 
 
 def _slugify(name: str) -> str:
@@ -89,10 +99,51 @@ def _progress(session: ChatSession) -> dict:
 
 
 def _set_progress(session: ChatSession, **kwargs: Any) -> dict:
-    p = _progress(session)
+    """Merge into intake_progress, force JSONB dirty flag, never clobber role_name unless explicit."""
+    before = _progress(session)
+    logger.info(
+        "intake_progress BEFORE session=%s step=%s keys=%s",
+        session.id,
+        before.get("step"),
+        sorted(before.keys()),
+    )
+
+    p = dict(before)
+    # role_name is set once at intake start and must not be overwritten by later field answers
+    if "role_name" in kwargs and before.get("role_name") and kwargs["role_name"] != before["role_name"]:
+        if before.get("step") not in (None, "role_name"):
+            logger.warning(
+                "Ignoring attempt to overwrite role_name=%r with %r at step=%s",
+                before.get("role_name"),
+                kwargs.get("role_name"),
+                before.get("step"),
+            )
+            kwargs = {k: v for k, v in kwargs.items() if k != "role_name"}
+
     p.update(kwargs)
+    # Assign a fresh dict + flag_modified so Postgres JSONB always persists
     session.intake_progress = p
-    return p
+    try:
+        flag_modified(session, "intake_progress")
+    except Exception:
+        # Non-ORM stand-ins (unit tests) have no SQLAlchemy instrumentation
+        pass
+    _touch(session)
+
+    after = _progress(session)
+    logger.info(
+        "intake_progress AFTER  session=%s step=%s role_name=%r keys=%s",
+        session.id,
+        after.get("step"),
+        after.get("role_name"),
+        sorted(after.keys()),
+    )
+    return after
+
+
+def _role_name(session: ChatSession) -> str:
+    """Stable role name from intake_progress — never from the current field answer."""
+    return (_progress(session).get("role_name") or "this role").strip() or "this role"
 
 
 def format_confirm_summary(p: dict) -> str:
@@ -119,16 +170,17 @@ def format_confirm_summary(p: dict) -> str:
 
 def _function_prompt(role_name: str) -> str:
     opts = llm.plausible_functions_for_role(role_name)
-    lines = "\n".join(f"  · {o}" for o in opts)
+    # Plain label lines only — no · / - bullets that get copy-pasted into answers
+    lines = "\n".join(opts)
     return (
-        f"Which LinkedIn function best fits **{role_name}**?\n"
+        f"Which LinkedIn function best fits {role_name}?\n"
         f"Pick exactly one from this list:\n{lines}\n\n"
         "(Answer must match a label above — case doesn't matter.)"
     )
 
 
 def _years_prompt() -> str:
-    lines = "\n".join(f"  · {y}" for y in YEARS_LABELS)
+    lines = "\n".join(YEARS_LABELS)
     return (
         "Years of experience — pick one or more (comma-separated):\n"
         f"{lines}\n\n"
@@ -137,12 +189,12 @@ def _years_prompt() -> str:
 
 
 def _titles_prompt(titles: list[str]) -> str:
-    numbered = "\n".join(f"  {i+1}. {t}" for i, t in enumerate(titles))
+    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
     return (
         "Suggested current job titles for the search:\n"
         f"{numbered}\n\n"
         "Reply with add / remove / confirm in plain language "
-        "(e.g. \"drop 3, add Talent Coordinator, looks good\")."
+        '(e.g. "drop 3, add Talent Coordinator, looks good").'
     )
 
 
@@ -164,14 +216,13 @@ def _pool_prompt() -> str:
     return "How many profiles should I pull this batch - 25, 50, more?"
 
 
-def start_session(db: Session, role_slug: str | None = None) -> dict:
+def start_session(db: Session, role_slug: Optional[str] = None) -> dict:
     """Create a chat session. If role_slug given and exists, resume/ready; else intake."""
     role = None
-    if role_slug:
+    if role_slug and role_slug != "new":
         role = db.execute(select(Role).where(Role.slug == role_slug)).scalar_one_or_none()
 
     if role and role.retrieval and role.retrieval.get("functions"):
-        # Existing configured role → ready session
         session = ChatSession(
             id=uuid.uuid4(),
             role_id=role.id,
@@ -184,14 +235,13 @@ def start_session(db: Session, role_slug: str | None = None) -> dict:
         )
         db.add(session)
         greeting = (
-            f"Ready on **{role.role_name}**. "
+            f"Ready on {role.role_name}. "
             "Ask me to pull another batch, show the table, or change a filter."
         )
         _save_msg(db, session.id, "assistant", greeting)
         db.commit()
         return _session_payload(db, session, greeting)
 
-    # Fresh intake
     session = ChatSession(
         id=uuid.uuid4(),
         role_id=role.id if role else None,
@@ -213,58 +263,112 @@ def _session_payload(
     session: ChatSession,
     assistant_text: str,
     *,
-    candidates: list | None = None,
-    summary: str | None = None,
-    action: str | None = None,
+    candidates: Optional[list] = None,
+    summary: Optional[str] = None,
+    action: Optional[str] = None,
 ) -> dict:
     role = db.get(Role, session.role_id) if session.role_id else None
+    p = _progress(session)
     return {
         "session_id": str(session.id),
         "state": session.state,
-        "role_slug": role.slug if role else (_progress(session).get("slug")),
-        "intake_progress": _progress(session),
-        "assistant_message": assistant_text,
+        "role_slug": role.slug if role else p.get("slug"),
+        "intake_progress": p,
+        "assistant_message": _plain(assistant_text),
         "candidates": candidates,
         "summary": summary,
         "action": action,
     }
 
 
-def handle_message(db: Session, role_slug: str, message: str) -> dict:
-    """POST /chat/{role_slug}/message entry — route by session state."""
-    message = (message or "").strip()
-    if not message:
-        raise ValueError("empty message")
+def _find_session(
+    db: Session,
+    role_slug: str,
+    session_id: Optional[str] = None,
+) -> Optional[ChatSession]:
+    """Resolve the active chat session without orphaning mid-intake turns.
 
-    # Prefer latest session for this slug; if slug is "new", start intake
+    Intake creates a slug in intake_progress before a roles row exists. Looking
+    up only by roles.slug caused every post-role-name reply to spawn a NEW
+    session (and treat the function answer as a new role_name).
+    """
+    if session_id:
+        try:
+            sid = uuid.UUID(str(session_id))
+        except ValueError:
+            sid = None
+        if sid:
+            found = db.get(ChatSession, sid)
+            if found:
+                return found
+
     role = None
     if role_slug and role_slug != "new":
         role = db.execute(select(Role).where(Role.slug == role_slug)).scalar_one_or_none()
 
-    session = None
     if role:
-        session = db.execute(
+        found = db.execute(
             select(ChatSession)
             .where(ChatSession.role_id == role.id)
             .order_by(ChatSession.updated_at.desc())
             .limit(1)
         ).scalar_one_or_none()
+        if found:
+            return found
 
-    # Also allow addressing a brand-new intake session keyed by slug "new"
-    if session is None and role_slug == "new":
-        session = db.execute(
+    # Mid-intake: Role row does not exist yet — match by progress.slug
+    if role_slug and role_slug != "new":
+        found = db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.state.in_(("intake", "confirm")),
+                ChatSession.intake_progress.contains({"slug": role_slug}),
+            )
+            .order_by(ChatSession.updated_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if found:
+            return found
+
+    if role_slug == "new":
+        return db.execute(
             select(ChatSession)
             .where(ChatSession.role_id.is_(None), ChatSession.state == "intake")
             .order_by(ChatSession.updated_at.desc())
             .limit(1)
         ).scalar_one_or_none()
 
+    return None
+
+
+def handle_message(
+    db: Session,
+    role_slug: str,
+    message: str,
+    session_id: Optional[str] = None,
+) -> dict:
+    """POST /chat/{role_slug}/message entry — route by session state."""
+    message = clean_answer(message or "")
+    if not message:
+        raise ValueError("empty message")
+
+    session = _find_session(db, role_slug, session_id=session_id)
+
     if session is None:
-        # Auto-start
         started = start_session(db, None if role_slug == "new" else role_slug)
         session = db.get(ChatSession, uuid.UUID(started["session_id"]))
 
     assert session is not None
+    logger.info(
+        "handle_message session=%s state=%s step=%s role_slug=%s role_name=%r msg=%r",
+        session.id,
+        session.state,
+        _progress(session).get("step"),
+        role_slug,
+        _progress(session).get("role_name"),
+        message[:80],
+    )
+
     _save_msg(db, session.id, "user", message)
     _touch(session)
 
@@ -275,9 +379,15 @@ def handle_message(db: Session, role_slug: str, message: str) -> dict:
     elif session.state == "ready":
         result = _handle_ready(db, session, message)
     else:
-        result = _session_payload(db, session, "Session in unknown state — start a new role.")
+        result = _session_payload(
+            db, session, "Session in unknown state — start a new role."
+        )
 
     db.commit()
+    db.refresh(session)
+    # Ensure payload reflects persisted progress
+    result["intake_progress"] = _progress(session)
+    result["session_id"] = str(session.id)
     return result
 
 
@@ -304,9 +414,8 @@ def _handle_intake(db: Session, session: ChatSession, message: str) -> dict:
         return _intake_pool(db, session, message)
     if step == "email_enrichment":
         return _intake_email(db, session, message)
-    # Re-open single field from confirm
     if step.startswith("edit_"):
-        return _intake_edit_field(db, session, message, step[len("edit_"):])
+        return _intake_edit_field(db, session, message, step[len("edit_") :])
 
     reply = "I'm not sure where we left off — what's the role name?"
     _set_progress(session, step="role_name")
@@ -315,7 +424,6 @@ def _handle_intake(db: Session, session: ChatSession, message: str) -> dict:
 
 
 def _intake_role_name(db: Session, session: ChatSession, message: str) -> dict:
-    # Detect location override on this turn
     loc = DEFAULT_LOCATION
     ask_location = False
     lower = message.lower()
@@ -324,7 +432,6 @@ def _intake_role_name(db: Session, session: ChatSession, message: str) -> dict:
         message,
         re.IGNORECASE,
     )
-    # Simple: if user mentions a place that isn't UAE
     if any(
         x in lower
         for x in (
@@ -342,11 +449,9 @@ def _intake_role_name(db: Session, session: ChatSession, message: str) -> dict:
             "singapore",
         )
     ) or ("location" in lower and "uae" not in lower and "emirates" not in lower):
-        # Keep full message as role if unclear — try to split
         ask_location = True
 
     role_name = message
-    # Strip trailing location phrases for cleaner role name
     role_name = re.sub(
         r"\s+(?:in|based in|location[:\s]+).*$",
         "",
@@ -358,6 +463,7 @@ def _intake_role_name(db: Session, session: ChatSession, message: str) -> dict:
         loc = loc_match.group(1).strip()
 
     slug = _unique_slug(db, _slugify(role_name))
+    # Set role_name ONCE here — subsequent steps must not overwrite it
     _set_progress(
         session,
         step="location" if ask_location and loc == DEFAULT_LOCATION else "function",
@@ -369,7 +475,10 @@ def _intake_role_name(db: Session, session: ChatSession, message: str) -> dict:
 
     if ask_location and not loc_match:
         _set_progress(session, step="location")
-        reply = f"Got it — **{role_name}**. Which location should I search? (default: {DEFAULT_LOCATION})"
+        reply = (
+            f"Got it — {role_name}. Which location should I search? "
+            f"(default: {DEFAULT_LOCATION})"
+        )
         _save_msg(db, session.id, "assistant", reply)
         return _session_payload(db, session, reply)
 
@@ -380,26 +489,24 @@ def _intake_role_name(db: Session, session: ChatSession, message: str) -> dict:
 
 
 def _intake_location(db: Session, session: ChatSession, message: str) -> dict:
-    loc = message.strip() or DEFAULT_LOCATION
-    p = _set_progress(session, location=loc, step="function")
-    reply = _function_prompt(p["role_name"])
+    loc = clean_answer(message) or DEFAULT_LOCATION
+    _set_progress(session, location=loc, step="function")
+    reply = _function_prompt(_role_name(session))
     _save_msg(db, session.id, "assistant", reply)
     return _session_payload(db, session, reply)
 
 
 def _intake_function(db: Session, session: ChatSession, message: str) -> dict:
-    p = _progress(session)
     key = resolve_function(message)
     if key is None:
-        # Also try matching against the shown plausible subset only — still must be in map
         reply = (
-            f"I need an exact match from the list.\n\n"
-            + _function_prompt(p.get("role_name", "this role"))
+            "I need an exact match from the list.\n\n"
+            + _function_prompt(_role_name(session))
         )
         _save_msg(db, session.id, "assistant", reply)
         return _session_payload(db, session, reply)
 
-    label = key.title() if key != "human resources" else "Human Resources"
+    label = "Human Resources" if key == "human resources" else key.title()
     _set_progress(
         session,
         functions=[label],
@@ -426,7 +533,6 @@ def _intake_years(db: Session, session: ChatSession, message: str) -> dict:
     titles = llm.suggest_job_titles(p["role_name"], valid)
     nat = check_titles_nationality(titles)
     if nat:
-        # Extremely unlikely from generator; still enforce
         titles = [t for t in titles if not find_nationality_hit(t)]
     _set_progress(session, suggested_titles=titles, current_job_titles=titles)
     reply = _titles_prompt(titles)
@@ -437,7 +543,7 @@ def _intake_years(db: Session, session: ChatSession, message: str) -> dict:
 def _intake_titles(db: Session, session: ChatSession, message: str) -> dict:
     p = _progress(session)
     shown = list(p.get("suggested_titles") or p.get("current_job_titles") or [])
-    lower = message.lower().strip()
+    lower = clean_answer(message).lower()
     if lower in ("confirm", "looks good", "ok", "okay", "yes", "good", "lgtm"):
         titles = shown
     else:
@@ -453,13 +559,12 @@ def _intake_titles(db: Session, session: ChatSession, message: str) -> dict:
         _save_msg(db, session.id, "assistant", reply)
         return _session_payload(db, session, reply)
 
-    # If user said something that wasn't pure confirm, show updated list once for confirm
     if lower not in ("confirm", "looks good", "ok", "okay", "yes", "good", "lgtm"):
         if titles != shown:
             _set_progress(session, suggested_titles=titles, current_job_titles=titles)
             reply = (
                 "Updated titles:\n"
-                + "\n".join(f"  {i+1}. {t}" for i, t in enumerate(titles))
+                + "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
                 + '\n\nSay "confirm" to continue, or keep editing.'
             )
             _save_msg(db, session.id, "assistant", reply)
@@ -478,20 +583,17 @@ def _intake_anchor(db: Session, session: ChatSession, message: str) -> dict:
     p = _progress(session)
     fk = p.get("function_key") or ""
     broad = fk in BROAD_FUNCTIONS
-    # Also check titles for nationality
     nat = check_titles_nationality(p.get("current_job_titles") or [])
     if nat:
         _save_msg(db, session.id, "assistant", nat)
         return _session_payload(db, session, nat)
 
-    err = validate_anchor(message, broad_function=broad)
+    anchor = clean_answer(message)
+    err = validate_anchor(anchor, broad_function=broad)
     if err:
         _save_msg(db, session.id, "assistant", err)
         return _session_payload(db, session, err)
 
-    # Accept literal (no truncate) — empty allowed only for narrow functions
-    anchor = message.strip()
-    # Reject if titles+anchor together hit nationality (anchor already checked)
     _set_progress(session, searchQuery=anchor, step="pool_cap")
     reply = _pool_prompt()
     _save_msg(db, session.id, "assistant", reply)
@@ -499,7 +601,7 @@ def _intake_anchor(db: Session, session: ChatSession, message: str) -> dict:
 
 
 def _intake_pool(db: Session, session: ChatSession, message: str) -> dict:
-    n = llm.extract_pool_cap(message)
+    n = llm.extract_pool_cap(clean_answer(message))
     if n is None or n < 10 or n > 150:
         reply = "Please give an integer between 10 and 150. " + _pool_prompt()
         _save_msg(db, session.id, "assistant", reply)
@@ -511,14 +613,14 @@ def _intake_pool(db: Session, session: ChatSession, message: str) -> dict:
 
 
 def _intake_email(db: Session, session: ChatSession, message: str) -> dict:
-    lower = message.lower()
+    lower = clean_answer(message).lower()
     if any(x in lower for x in ("email", "emails", "yes", "outreach", "direct")):
         mode = "Full + email search"
     elif any(x in lower for x in ("linkedin", "enough", "no", "only")):
         mode = "Full"
     else:
         reply = (
-            "Please choose: **LinkedIn only** or **yes, include emails**. "
+            "Please choose: LinkedIn only or yes, include emails. "
             "(Short mode is never offered — we always enrich profiles we keep.)"
         )
         _save_msg(db, session.id, "assistant", reply)
@@ -532,8 +634,6 @@ def _intake_email(db: Session, session: ChatSession, message: str) -> dict:
 
 
 def _intake_edit_field(db: Session, session: ChatSession, message: str, field: str) -> dict:
-    """Re-answer a single field after confirm 'change something'."""
-    # Temporarily route into the matching intake handler then re-show confirm
     mapping = {
         "location": "location",
         "function": "function",
@@ -552,7 +652,6 @@ def _intake_edit_field(db: Session, session: ChatSession, message: str, field: s
     step = mapping.get(field, field)
     _set_progress(session, step=step, _return_to_confirm=True)
 
-    # Process as if on that step
     handlers = {
         "location": _intake_location,
         "function": _intake_function,
@@ -572,8 +671,6 @@ def _intake_edit_field(db: Session, session: ChatSession, message: str, field: s
     result = handler(db, session, message)
     p = _progress(session)
     if p.get("_return_to_confirm") and session.state != "confirm":
-        # If handler advanced past the field without going to confirm, snap back
-        # only when the field itself was accepted (step changed away from edit target)
         if p.get("step") != step:
             session.state = "confirm"
             _set_progress(session, step="done", _return_to_confirm=False)
@@ -587,11 +684,11 @@ def _intake_edit_field(db: Session, session: ChatSession, message: str, field: s
 
 
 def _handle_confirm(db: Session, session: ChatSession, message: str) -> dict:
-    lower = message.lower().strip()
+    lower = clean_answer(message).lower()
     p = _progress(session)
 
     if p.get("awaiting_change_field"):
-        field = message.strip().lower().replace(" ", "_")
+        field = clean_answer(message).lower().replace(" ", "_")
         aliases = {
             "years": "years_of_experience",
             "titles": "current_job_titles",
@@ -608,18 +705,24 @@ def _handle_confirm(db: Session, session: ChatSession, message: str) -> dict:
         session.state = "intake"
         prompts = {
             "location": f"New location? (current: {p.get('location', DEFAULT_LOCATION)})",
-            "function": _function_prompt(p.get("role_name", "")),
+            "function": _function_prompt(_role_name(session)),
             "years_of_experience": _years_prompt(),
             "current_job_titles": _titles_prompt(p.get("current_job_titles") or []),
             "anchor_keyword": _anchor_prompt(p.get("function_key") or ""),
             "pool_cap": _pool_prompt(),
             "email_enrichment": _email_prompt(),
         }
-        reply = prompts.get(field, "Which field? (location / function / years / titles / anchor / pool / contact)")
+        reply = prompts.get(
+            field,
+            "Which field? (location / function / years / titles / anchor / pool / contact)",
+        )
         if field not in prompts:
             session.state = "confirm"
             _set_progress(session, awaiting_change_field=True, step="done")
-            reply = "Which field do you want to change? (location / function / years / titles / anchor / pool / contact)"
+            reply = (
+                "Which field do you want to change? "
+                "(location / function / years / titles / anchor / pool / contact)"
+            )
         _save_msg(db, session.id, "assistant", reply)
         return _session_payload(db, session, reply)
 
@@ -654,7 +757,6 @@ def _build_retrieval(p: dict) -> dict:
 def _finalize_and_pull(db: Session, session: ChatSession) -> dict:
     p = _progress(session)
     retrieval = _build_retrieval(p)
-    # Validate compile works before writing
     compile_retrieval({"retrieval": retrieval}, retrieval["pool_cap"])
 
     slug = p.get("slug") or _unique_slug(db, _slugify(p["role_name"]))
@@ -712,7 +814,6 @@ def _handle_ready(db: Session, session: ChatSession, message: str) -> dict:
         _save_msg(db, session.id, "assistant", reply)
         return _session_payload(db, session, reply)
 
-    # Sub-flows: awaiting same/change after PULL_BATCH ask; awaiting change confirm
     if p.get("awaiting_pull_choice"):
         return _ready_pull_choice(db, session, role, message)
     if p.get("awaiting_change_confirm"):
@@ -730,7 +831,9 @@ def _handle_ready(db: Session, session: ChatSession, message: str) -> dict:
 
     if intent == "SHOW_TABLE":
         rows = list_role_candidates(db, role.id)
-        reply = f"Showing {len(rows)} candidates for **{role.role_name}** (most recent first)."
+        reply = (
+            f"Showing {len(rows)} candidates for {role.role_name} (most recent first)."
+        )
         _save_msg(db, session.id, "assistant", reply)
         return _session_payload(
             db, session, reply, candidates=rows, action="SHOW_TABLE"
@@ -741,8 +844,10 @@ def _handle_ready(db: Session, session: ChatSession, message: str) -> dict:
     return _session_payload(db, session, reply, action="OTHER")
 
 
-def _ready_pull_choice(db: Session, session: ChatSession, role: Role, message: str) -> dict:
-    lower = message.lower().strip()
+def _ready_pull_choice(
+    db: Session, session: ChatSession, role: Role, message: str
+) -> dict:
+    lower = clean_answer(message).lower()
     _set_progress(session, awaiting_pull_choice=False)
 
     if any(x in lower for x in ("change", "edit", "modify", "different", "update")):
@@ -751,7 +856,6 @@ def _ready_pull_choice(db: Session, session: ChatSession, role: Role, message: s
         _save_msg(db, session.id, "assistant", reply)
         return _session_payload(db, session, reply)
 
-    # default / "same"
     batch_size = int((role.retrieval or {}).get("pool_cap") or 25)
     result = pull_batch(db, role.id, batch_size=batch_size)
     summary = result.get("summary", "")
@@ -767,12 +871,17 @@ def _ready_pull_choice(db: Session, session: ChatSession, role: Role, message: s
     )
 
 
-def _ready_change_spec(db: Session, session: ChatSession, role: Role, message: str) -> dict:
+def _ready_change_spec(
+    db: Session, session: ChatSession, role: Role, message: str
+) -> dict:
     current = dict(role.retrieval or {})
     parsed = llm.parse_change_field(message, current)
     _set_progress(session, awaiting_change_spec=False)
     if not parsed:
-        reply = "I couldn't tell which field to change — try e.g. \"change years to 6-10 years\"."
+        reply = (
+            'I couldn\'t tell which field to change — try e.g. '
+            '"change years to 6-10 years".'
+        )
         _save_msg(db, session.id, "assistant", reply)
         return _session_payload(db, session, reply)
 
@@ -788,9 +897,11 @@ def _ready_change_spec(db: Session, session: ChatSession, role: Role, message: s
     return _session_payload(db, session, confirm_line)
 
 
-def _ready_change_confirm(db: Session, session: ChatSession, role: Role, message: str) -> dict:
-    lower = message.lower().strip()
-    pending = (_progress(session).get("pending_change") or {})
+def _ready_change_confirm(
+    db: Session, session: ChatSession, role: Role, message: str
+) -> dict:
+    lower = clean_answer(message).lower()
+    pending = _progress(session).get("pending_change") or {}
     _set_progress(session, awaiting_change_confirm=False, pending_change=None)
 
     if not (lower.startswith("y") or lower in ("ok", "okay", "confirm", "apply")):
@@ -835,7 +946,7 @@ def _ready_change_confirm(db: Session, session: ChatSession, role: Role, message
         if err:
             _save_msg(db, session.id, "assistant", err)
             return _session_payload(db, session, err)
-        retrieval["searchQuery"] = str(value).strip()
+        retrieval["searchQuery"] = clean_answer(str(value))
     elif field == "pool_cap":
         n = int(value)
         if n < 10 or n > 150:
@@ -852,7 +963,6 @@ def _ready_change_confirm(db: Session, session: ChatSession, role: Role, message
         _save_msg(db, session.id, "assistant", reply)
         return _session_payload(db, session, reply)
 
-    # Changed filter = different search → pagination restarts
     role.retrieval = retrieval
     role.last_page = 0
     role.updated_at = datetime.now(timezone.utc)

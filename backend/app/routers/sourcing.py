@@ -17,6 +17,7 @@ router = APIRouter(tags=["sourcing"])
 
 class MessageIn(BaseModel):
     message: str = Field(min_length=1)
+    session_id: Optional[str] = None
 
 
 class PullIn(BaseModel):
@@ -65,7 +66,9 @@ def start_or_resume_session(slug: str, db: Session = Depends(get_db)):
 @router.post("/chat/{role_slug}/message")
 def chat_message(role_slug: str, body: MessageIn, db: Session = Depends(get_db)):
     try:
-        return chat_service.handle_message(db, role_slug, body.message)
+        return chat_service.handle_message(
+            db, role_slug, body.message, session_id=body.session_id
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
