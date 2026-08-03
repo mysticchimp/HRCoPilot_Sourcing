@@ -464,7 +464,12 @@ def top_skills(p: dict) -> str:
 
 
 def compact(p: dict, idx: int = 0) -> dict:
-    """Profile shaping for display/storage — ported from contra6_source2.compact."""
+    """Shape a profile for UI table columns only — never persist this dict.
+
+    Flattened display fields (name, title, company, location, headline, skills)
+    are derived FROM the full Apify item. The untouched Apify item itself must
+    be stored separately as candidates.raw_profile.
+    """
     title, company = current_role(p)
     exps = [
         f"{e.get('position', '')} @ {e.get('companyName', '')} ({e.get('duration', '')})"

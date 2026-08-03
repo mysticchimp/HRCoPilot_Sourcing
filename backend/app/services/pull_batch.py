@@ -17,7 +17,7 @@ from app.apify.client import (
     ApifyTransientError,
     compact,
     compile_retrieval,
-    fetch_profiles_by_urls,
+    fetch_profiles,
     probe_pool,
     probe_with_relax,
 )
@@ -104,38 +104,83 @@ def _log_apify_call(
     return row
 
 
-def _upsert_candidate(db: Session, profile: dict, shaped: dict) -> Candidate:
-    url = _normalize_url(shaped.get("linkedinUrl"))
+def _upsert_candidate(db: Session, raw_apify_item: dict, display: dict) -> Candidate:
+    """Persist one candidate.
+
+    raw_apify_item — untouched Apify dataset item (Full mode) → raw_profile JSONB.
+    display — compact() output used ONLY for flattened UI columns.
+    """
+    url = _normalize_url(display.get("linkedinUrl")) or _normalize_url(
+        raw_apify_item.get("linkedinUrl")
+    )
     if not url:
         raise ValueError("profile missing linkedinUrl")
+
+    # Guard: never accidentally persist the compact()/display dict as raw_profile.
+    if set(raw_apify_item.keys()) <= {
+        "idx",
+        "firstName",
+        "lastName",
+        "headline",
+        "current_title",
+        "current_company",
+        "location",
+        "linkedinUrl",
+        "topSkills",
+        "_experience",
+        "_about",
+    }:
+        logger.warning(
+            "_upsert_candidate refused compact-shaped dict as raw_profile url=%s",
+            url,
+        )
+
+    about = raw_apify_item.get("about")
+    exp = raw_apify_item.get("experience")
+    logger.info(
+        "_upsert_candidate url=%s raw_keys=%s about_chars=%s experience_len=%s "
+        "education_len=%s skills_len=%s",
+        url,
+        sorted(raw_apify_item.keys())[:24],
+        len(about) if isinstance(about, str) else (0 if about is None else -1),
+        len(exp) if isinstance(exp, list) else 0,
+        len(raw_apify_item.get("education") or [])
+        if isinstance(raw_apify_item.get("education"), list)
+        else 0,
+        len(raw_apify_item.get("skills") or [])
+        if isinstance(raw_apify_item.get("skills"), list)
+        else 0,
+    )
 
     existing = db.execute(
         select(Candidate).where(Candidate.linkedin_url == url)
     ).scalar_one_or_none()
 
     if existing:
-        existing.first_name = shaped.get("firstName") or existing.first_name
-        existing.last_name = shaped.get("lastName") or existing.last_name
-        existing.headline = shaped.get("headline") or existing.headline
-        existing.current_title = shaped.get("current_title") or existing.current_title
-        existing.current_company = shaped.get("current_company") or existing.current_company
-        existing.location = shaped.get("location") or existing.location
-        existing.top_skills = shaped.get("topSkills") or existing.top_skills
-        existing.raw_profile = profile
+        existing.first_name = display.get("firstName") or existing.first_name
+        existing.last_name = display.get("lastName") or existing.last_name
+        existing.headline = display.get("headline") or existing.headline
+        existing.current_title = display.get("current_title") or existing.current_title
+        existing.current_company = (
+            display.get("current_company") or existing.current_company
+        )
+        existing.location = display.get("location") or existing.location
+        existing.top_skills = display.get("topSkills") or existing.top_skills
+        existing.raw_profile = raw_apify_item
         db.flush()
         return existing
 
     cand = Candidate(
         id=uuid.uuid4(),
         linkedin_url=url,
-        first_name=shaped.get("firstName"),
-        last_name=shaped.get("lastName"),
-        headline=shaped.get("headline"),
-        current_title=shaped.get("current_title"),
-        current_company=shaped.get("current_company"),
-        location=shaped.get("location"),
-        top_skills=shaped.get("topSkills"),
-        raw_profile=profile,
+        first_name=display.get("firstName"),
+        last_name=display.get("lastName"),
+        headline=display.get("headline"),
+        current_title=display.get("current_title"),
+        current_company=display.get("current_company"),
+        location=display.get("location"),
+        top_skills=display.get("topSkills"),
+        raw_profile=raw_apify_item,
         first_seen_at=datetime.now(timezone.utc),
     )
     db.add(cand)
@@ -348,15 +393,25 @@ def _pull_batch_inner(
         }
 
     mode = retrieval.get("profileScraperMode") or "Full"
+    # Full scrape of the SAME search filters/page (original CLI pattern).
+    # profileUrls enrich returns "no query" for Sales-Nav-style /in/ACwAA… URLs
+    # and never yields about/experience — so we must not rely on it for raw_profile.
+    full_input = dict(effective_input)
+    full_input["profileScraperMode"] = mode
+    full_input["startPage"] = page
+    full_input["takePages"] = 1
+    full_input["maxItems"] = max(batch_size, len(target_urls))
     logger.info(
-        "pull_batch starting Full enrich for %s urls mode=%s "
-        "(same run will be logged by fetch_profiles)",
-        len(target_urls),
+        "pull_batch starting Full search enrich page=%s mode=%s "
+        "target_urls=%s full_input=%s",
+        page,
         mode,
+        len(target_urls),
+        json.dumps(full_input, default=str),
     )
-    profiles, status, run_id = fetch_profiles_by_urls(target_urls, mode=mode)
+    profiles, status, run_id = fetch_profiles(full_input)
     logger.info(
-        "pull_batch Full enrich done run_id=%s status=%s raw profile count=%s "
+        "pull_batch Full search done run_id=%s status=%s raw profile count=%s "
         "(expected ~%s)",
         run_id,
         status,
@@ -373,16 +428,18 @@ def _pull_batch_inner(
         params_snapshot={
             "profileScraperMode": mode,
             "page": page,
-            "profileUrls": target_urls,
-            "maxItems": len(target_urls),
+            "full_search": True,
+            "maxItems": full_input.get("maxItems"),
             "retrieval": retrieval,
             "actor_status": status,
             "probe_pages": pages_scanned,
             "full_enrich_raw_count": len(profiles) if profiles else 0,
+            "actor_input": full_input,
         },
     )
 
     by_url: dict[str, dict] = {}
+    by_id: dict[str, dict] = {}
     full_missing_url = 0
     for p in profiles:
         u = _normalize_url(p.get("linkedinUrl"))
@@ -390,22 +447,18 @@ def _pull_batch_inner(
             by_url[u] = p
         else:
             full_missing_url += 1
+        pid = p.get("id") or p.get("profileIdInSearch")
+        if pid is not None:
+            by_id[str(pid)] = p
     logger.info(
-        "pull_batch Full enrich URL index size=%s missing_linkedinUrl=%s "
-        "target_urls=%s overlap=%s",
+        "pull_batch Full search URL index size=%s id_index=%s "
+        "missing_linkedinUrl=%s target_urls=%s overlap_by_url=%s",
         len(by_url),
+        len(by_id),
         full_missing_url,
         len(target_urls),
         len(set(by_url) & set(target_urls)),
     )
-
-    if not by_url and short_by_url:
-        logger.info(
-            "pull_batch Full enrich returned 0 usable profiles — falling back to "
-            "Short probe profiles for %s target urls (Short cache size=%s)",
-            len(target_urls),
-            len(short_by_url),
-        )
 
     stored: list[Candidate] = []
     upserted = 0
@@ -413,9 +466,17 @@ def _pull_batch_inner(
     used_short_fallback = 0
     skipped_no_profile = 0
     for i, url in enumerate(target_urls):
+        # Prefer Full search item (has about/experience). Match by URL, then by
+        # Short-item id if LinkedIn URL forms differ across modes.
         profile = by_url.get(url)
         source = "full"
         if not profile:
+            short = short_by_url.get(url) or {}
+            sid = short.get("id") or short.get("profileIdInSearch")
+            if sid is not None:
+                profile = by_id.get(str(sid))
+        if not profile:
+            # Last resort: Short hit — incomplete for ML (no about/experience).
             profile = short_by_url.get(url)
             source = "short_fallback"
         if not profile:
@@ -427,8 +488,15 @@ def _pull_batch_inner(
             continue
         if source == "short_fallback":
             used_short_fallback += 1
-        shaped = compact(profile, i)
-        cand = _upsert_candidate(db, profile, shaped)
+            logger.warning(
+                "pull_batch storing Short fallback as raw_profile (no about/"
+                "experience) url=%s — Full search miss",
+                url,
+            )
+
+        display = compact(profile, i)
+        # raw_profile = untouched Apify item; display columns from compact() only.
+        cand = _upsert_candidate(db, profile, display)
         upserted += 1
         result = db.execute(
             pg_insert(RoleCandidate)
@@ -440,7 +508,6 @@ def _pull_batch_inner(
             )
             .on_conflict_do_nothing(index_elements=["role_id", "candidate_id"])
         )
-        # rowcount: 1 insert, 0 on conflict do nothing
         rc = result.rowcount if result.rowcount is not None else -1
         if rc == 1:
             role_candidate_inserts += 1
