@@ -48,6 +48,44 @@ def test_resolve_prefers_full_by_id():
     assert got is full
 
 
+def test_resolve_matches_acw_short_to_aco_full_via_stem():
+    from app.services.pull_batch import (
+        _index_full_profiles,
+        _linkedin_member_stem,
+    )
+
+    short_id = "ACwAADBdtwoB-gklyGL5mrQ3JXsvLE5_FUyR8kw"
+    full_id = "ACoAADBdtwoBFjcvcNOvf4QuK8JXnst1YbEZTbA"
+    assert _linkedin_member_stem(short_id) == _linkedin_member_stem(full_id)
+
+    short = {
+        "id": short_id,
+        "linkedinUrl": f"https://www.linkedin.com/in/{short_id}",
+        "currentPositions": [],
+    }
+    full = {
+        "id": full_id,
+        "linkedinUrl": "https://www.linkedin.com/in/ashika-s-kumar-00a9041a7",
+        "headline": "HR Ops",
+        "experience": [{"position": "HR"}],
+        "skills": [{"name": "Onboarding"}],
+        "firstName": "Ashika",
+    }
+    by_url: dict = {}
+    by_id: dict = {}
+    by_stem: dict = {}
+    _index_full_profiles([full], by_url, by_id, by_stem)
+    url = short["linkedinUrl"]
+    got = _resolve_full_profile(
+        url,
+        by_url=by_url,
+        by_id=by_id,
+        short_by_url={url: short},
+        by_stem=by_stem,
+    )
+    assert got is full
+
+
 def test_score_role_skips_incomplete_and_does_not_send_them():
     complete = MagicMock()
     complete.id = uuid.uuid4()

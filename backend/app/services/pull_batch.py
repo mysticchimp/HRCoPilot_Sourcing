@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -143,6 +144,25 @@ def _normalize_url(url: str | None) -> str | None:
     return u or None
 
 
+# Short search returns Sales-Nav ids (ACwAA…); Full returns member ids (ACoAA…).
+# After the AC[ow]AA prefix they share a stable 7-char stem for the same person.
+_LINKEDIN_ID_PREFIX_RE = re.compile(r"^AC[ow]AA", re.IGNORECASE)
+_LINKEDIN_ID_STEM_LEN = 7
+
+
+def _linkedin_member_stem(value: str | None) -> str | None:
+    """Stable cross-mode id stem shared by ACwAA (Short) and ACoAA (Full)."""
+    if not value:
+        return None
+    s = str(value).strip()
+    if "/in/" in s:
+        s = s.split("/in/")[-1].split("?")[0].rstrip("/")
+    s = _LINKEDIN_ID_PREFIX_RE.sub("", s)
+    if len(s) < _LINKEDIN_ID_STEM_LEN:
+        return None
+    return s[:_LINKEDIN_ID_STEM_LEN]
+
+
 def _is_complete_apify_profile(profile: dict | None) -> bool:
     """True when the Apify item carries Full-mode substance (not a Short stub)."""
     if not profile or not isinstance(profile, dict):
@@ -160,9 +180,12 @@ def _is_complete_apify_profile(profile: dict | None) -> bool:
 
 
 def _index_full_profiles(
-    profiles: list, by_url: dict[str, dict], by_id: dict[str, dict]
+    profiles: list,
+    by_url: dict[str, dict],
+    by_id: dict[str, dict],
+    by_stem: dict[str, dict] | None = None,
 ) -> int:
-    """Merge Full items into URL/id indexes. Returns count missing linkedinUrl."""
+    """Merge Full items into URL/id/stem indexes. Returns count missing linkedinUrl."""
     missing_url = 0
     for p in profiles or []:
         if not isinstance(p, dict):
@@ -175,6 +198,13 @@ def _index_full_profiles(
         pid = p.get("id") or p.get("profileIdInSearch")
         if pid is not None:
             by_id[str(pid)] = p
+        if by_stem is not None:
+            for raw in (pid, u, p.get("linkedinUrl")):
+                stem = _linkedin_member_stem(
+                    str(raw) if raw is not None else None
+                )
+                if stem and stem not in by_stem:
+                    by_stem[stem] = p
     return missing_url
 
 
@@ -184,6 +214,7 @@ def _resolve_full_profile(
     by_url: dict[str, dict],
     by_id: dict[str, dict],
     short_by_url: dict[str, dict],
+    by_stem: dict[str, dict] | None = None,
 ) -> dict | None:
     profile = by_url.get(url)
     if profile and _is_complete_apify_profile(profile):
@@ -194,8 +225,16 @@ def _resolve_full_profile(
         by_id_hit = by_id.get(str(sid))
         if by_id_hit and _is_complete_apify_profile(by_id_hit):
             return by_id_hit
+    # Short ACwAA… vs Full ACoAA… — match on shared member stem.
+    if by_stem:
+        for raw in (sid, url, short.get("linkedinUrl")):
+            stem = _linkedin_member_stem(str(raw) if raw is not None else None)
+            if not stem:
+                continue
+            stem_hit = by_stem.get(stem)
+            if stem_hit and _is_complete_apify_profile(stem_hit):
+                return stem_hit
     return None
-
 
 def _retry_full_enrich_for_missing(
     *,
@@ -204,6 +243,7 @@ def _retry_full_enrich_for_missing(
     by_url: dict[str, dict],
     by_id: dict[str, dict],
     short_by_url: dict[str, dict],
+    by_stem: dict[str, dict] | None = None,
 ) -> tuple[str | None, str | None]:
     """Re-run Full search up to FULL_ENRICH_RETRIES times for unresolved URLs.
 
@@ -238,7 +278,7 @@ def _retry_full_enrich_for_missing(
             last_status = e.status
             last_run_id = e.run_id
             continue
-        _index_full_profiles(profiles, by_url, by_id)
+        _index_full_profiles(profiles, by_url, by_id, by_stem)
         logger.info(
             "pull_batch Full enrich retry %s done run_id=%s status=%s "
             "raw_count=%s",
@@ -250,7 +290,11 @@ def _retry_full_enrich_for_missing(
         still: list[str] = []
         for url in pending:
             if _resolve_full_profile(
-                url, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+                url,
+                by_url=by_url,
+                by_id=by_id,
+                short_by_url=short_by_url,
+                by_stem=by_stem,
             ):
                 logger.info(
                     "pull_batch Full enrich retry recovered url=%s attempt=%s",
@@ -650,12 +694,14 @@ def _pull_batch_inner(
 
     by_url: dict[str, dict] = {}
     by_id: dict[str, dict] = {}
-    full_missing_url = _index_full_profiles(profiles, by_url, by_id)
+    by_stem: dict[str, dict] = {}
+    full_missing_url = _index_full_profiles(profiles, by_url, by_id, by_stem)
     logger.info(
-        "pull_batch Full search URL index size=%s id_index=%s "
+        "pull_batch Full search URL index size=%s id_index=%s stem_index=%s "
         "missing_linkedinUrl=%s target_urls=%s overlap_by_url=%s",
         len(by_url),
         len(by_id),
+        len(by_stem),
         full_missing_url,
         len(target_urls),
         len(set(by_url) & set(target_urls)),
@@ -665,7 +711,11 @@ def _pull_batch_inner(
         u
         for u in target_urls
         if not _resolve_full_profile(
-            u, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+            u,
+            by_url=by_url,
+            by_id=by_id,
+            short_by_url=short_by_url,
+            by_stem=by_stem,
         )
     ]
     if unresolved:
@@ -675,6 +725,7 @@ def _pull_batch_inner(
             by_url=by_url,
             by_id=by_id,
             short_by_url=short_by_url,
+            by_stem=by_stem,
         )
         if retry_run_id:
             run_id = retry_run_id
@@ -708,7 +759,11 @@ def _pull_batch_inner(
     skipped_no_profile = 0
     for i, url in enumerate(target_urls):
         profile = _resolve_full_profile(
-            url, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+            url,
+            by_url=by_url,
+            by_id=by_id,
+            short_by_url=short_by_url,
+            by_stem=by_stem,
         )
         is_complete = True
         if not profile:
@@ -964,13 +1019,18 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
 
     by_url: dict[str, dict] = {}
     by_id: dict[str, dict] = {}
-    _index_full_profiles(profiles, by_url, by_id)
+    by_stem: dict[str, dict] = {}
+    _index_full_profiles(profiles, by_url, by_id, by_stem)
 
     unresolved = [
         u
         for u in target_urls
         if not _resolve_full_profile(
-            u, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+            u,
+            by_url=by_url,
+            by_id=by_id,
+            short_by_url=short_by_url,
+            by_stem=by_stem,
         )
     ]
     if unresolved:
@@ -980,6 +1040,7 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
             by_url=by_url,
             by_id=by_id,
             short_by_url=short_by_url,
+            by_stem=by_stem,
         )
         if retry_run_id:
             run_id = retry_run_id
@@ -1012,7 +1073,11 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
             still.append(cand)
             continue
         profile = _resolve_full_profile(
-            url, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+            url,
+            by_url=by_url,
+            by_id=by_id,
+            short_by_url=short_by_url,
+            by_stem=by_stem,
         )
         if not profile:
             still.append(cand)
