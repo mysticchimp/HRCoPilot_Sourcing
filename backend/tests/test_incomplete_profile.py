@@ -86,6 +86,59 @@ def test_resolve_matches_acw_short_to_aco_full_via_stem():
     assert got is full
 
 
+def test_upsert_updates_existing_when_passed_even_if_url_differs():
+    from app.services.pull_batch import _upsert_candidate
+
+    short_url = "https://www.linkedin.com/in/ACwAADBdtwoB-gklyGL5mrQ3JXsvLE5_FUyR8kw"
+    existing = MagicMock()
+    existing.id = uuid.uuid4()
+    existing.linkedin_url = short_url
+    existing.is_complete_profile = False
+    existing.first_name = "Ashika"
+    existing.last_name = "S. Kumar"
+    existing.headline = ""
+    existing.current_title = "HR"
+    existing.current_company = None
+    existing.location = "Dubai"
+    existing.top_skills = ""
+    existing.raw_profile = {"id": "ACwAADBdtwoB-gklyGL5mrQ3JXsvLE5_FUyR8kw"}
+
+    full = {
+        "id": "ACoAADBdtwoBFjcvcNOvf4QuK8JXnst1YbEZTbA",
+        "linkedinUrl": "https://www.linkedin.com/in/ashika-s-kumar-00a9041a7",
+        "firstName": "Ashika",
+        "lastName": "S. Kumar",
+        "headline": "HR Ops",
+        "experience": [{"position": "HR"}],
+        "skills": [{"name": "Onboarding"}],
+    }
+    display = {
+        "firstName": "Ashika",
+        "lastName": "S. Kumar",
+        "headline": "HR Ops",
+        "current_title": "HR Ops",
+        "current_company": "Vantage",
+        "location": "Dubai",
+        "linkedinUrl": full["linkedinUrl"],
+        "topSkills": "Onboarding",
+    }
+
+    db = MagicMock()
+    # No conflict on slug URL
+    db.execute.return_value.scalar_one_or_none.return_value = None
+
+    out = _upsert_candidate(
+        db, full, display, is_complete=True, existing=existing
+    )
+    assert out is existing
+    assert existing.is_complete_profile is True
+    assert existing.headline == "HR Ops"
+    assert existing.raw_profile is full
+    # Migrated to public slug when no conflict
+    assert existing.linkedin_url == full["linkedinUrl"]
+    db.flush.assert_called()
+
+
 def test_score_role_skips_incomplete_and_does_not_send_them():
     complete = MagicMock()
     complete.id = uuid.uuid4()

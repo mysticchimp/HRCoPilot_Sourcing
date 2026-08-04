@@ -361,22 +361,51 @@ def _log_apify_call(
     return row
 
 
+def _find_candidate_by_linkedin_stem(
+    db: Session, stem: str
+) -> Candidate | None:
+    """Find a candidate whose linkedin_url/raw id shares the ACw/ACo stem."""
+    if not stem:
+        return None
+    # Sales-Nav URLs embed the full ACwAA… id; stem is the stable 7-char body.
+    rows = (
+        db.execute(
+            select(Candidate).where(Candidate.linkedin_url.contains(stem))
+        )
+        .scalars()
+        .all()
+    )
+    for cand in rows:
+        if _linkedin_member_stem(cand.linkedin_url) == stem:
+            return cand
+        raw = cand.raw_profile if isinstance(cand.raw_profile, dict) else {}
+        rid = raw.get("id") or raw.get("profileIdInSearch")
+        if _linkedin_member_stem(str(rid) if rid is not None else None) == stem:
+            return cand
+    return None
+
+
 def _upsert_candidate(
     db: Session,
     raw_apify_item: dict,
     display: dict,
     *,
     is_complete: bool,
+    existing: Candidate | None = None,
 ) -> Candidate:
     """Persist one candidate.
 
     raw_apify_item — untouched Apify dataset item → raw_profile JSONB.
     display — compact() output used ONLY for flattened UI columns.
     is_complete — False when storing a Short stub after Full enrich failed.
+    existing — when set (e.g. retry-incomplete), update that row even if the
+    Full profile's public slug URL differs from the stored Sales-Nav ACwAA URL.
     """
     url = _normalize_url(display.get("linkedinUrl")) or _normalize_url(
         raw_apify_item.get("linkedinUrl")
     )
+    if not url and existing is not None:
+        url = _normalize_url(existing.linkedin_url)
     if not url:
         raise ValueError("profile missing linkedinUrl")
 
@@ -417,11 +446,45 @@ def _upsert_candidate(
         else 0,
     )
 
-    existing = db.execute(
-        select(Candidate).where(Candidate.linkedin_url == url)
-    ).scalar_one_or_none()
+    if existing is None:
+        existing = db.execute(
+            select(Candidate).where(Candidate.linkedin_url == url)
+        ).scalar_one_or_none()
+    if existing is None:
+        # Full public-slug URL vs stored Sales-Nav /in/ACwAA… URL.
+        stem = _linkedin_member_stem(url) or _linkedin_member_stem(
+            str(raw_apify_item.get("id") or raw_apify_item.get("profileIdInSearch") or "")
+            or None
+        )
+        if stem:
+            existing = _find_candidate_by_linkedin_stem(db, stem)
+            if existing:
+                logger.info(
+                    "_upsert_candidate matched existing via stem=%s "
+                    "stored_url=%s full_url=%s",
+                    stem,
+                    existing.linkedin_url,
+                    url,
+                )
 
     if existing:
+        # Prefer the public slug URL when it does not collide with another row.
+        if url != existing.linkedin_url:
+            conflict = db.execute(
+                select(Candidate).where(
+                    Candidate.linkedin_url == url,
+                    Candidate.id != existing.id,
+                )
+            ).scalar_one_or_none()
+            if conflict is None:
+                existing.linkedin_url = url
+            else:
+                logger.info(
+                    "_upsert_candidate keeping stored url=%s; slug=%s owned by %s",
+                    existing.linkedin_url,
+                    url,
+                    conflict.id,
+                )
         existing.first_name = display.get("firstName") or existing.first_name
         existing.last_name = display.get("lastName") or existing.last_name
         existing.headline = display.get("headline") or existing.headline
@@ -1083,7 +1146,9 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
             still.append(cand)
             continue
         display = compact(profile, i)
-        updated = _upsert_candidate(db, profile, display, is_complete=True)
+        updated = _upsert_candidate(
+            db, profile, display, is_complete=True, existing=cand
+        )
         upgraded.append(updated)
 
     role.updated_at = datetime.now(timezone.utc)
