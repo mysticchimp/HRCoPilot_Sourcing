@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -45,6 +45,11 @@ class Candidate(Base):
     location: Mapped[Optional[str]] = mapped_column(Text)
     top_skills: Mapped[Optional[str]] = mapped_column(Text)
     raw_profile: Mapped[Optional[dict]] = mapped_column(JSONB)
+    # False when raw_profile is a Short stub (no experience/skills/about) stored
+    # after Full enrich failed — not equivalent to a Full profile for ML/UI.
+    is_complete_profile: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

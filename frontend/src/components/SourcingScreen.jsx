@@ -4,6 +4,7 @@ import RolePicker from './RolePicker';
 import { useRole } from '../lib/roleContext';
 import {
   fetchRoleCandidates,
+  retryIncompleteProfiles,
   sendChatMessage,
   startSession,
 } from '../lib/sourcingApi';
@@ -44,6 +45,7 @@ export default function SourcingScreen() {
   const [error, setError] = useState(null);
   const [summary, setSummary] = useState(null);
   const [chatWidth, setChatWidth] = useState(CHAT_DEFAULT);
+  const [retryingIncomplete, setRetryingIncomplete] = useState(false);
   const threadRef = useRef(null);
   const inputRef = useRef(null);
   const dragRef = useRef({ active: false, startX: 0, startW: CHAT_DEFAULT });
@@ -176,6 +178,24 @@ export default function SourcingScreen() {
       await archiveRole(role);
     } catch (err) {
       setError(err.message);
+    }
+  };
+
+  const incompleteCount = candidates.filter((c) => c.is_complete_profile === false)
+    .length;
+
+  const handleRetryIncomplete = async () => {
+    if (!activeSlug || activeSlug === 'new' || retryingIncomplete) return;
+    setRetryingIncomplete(true);
+    setError(null);
+    try {
+      const data = await retryIncompleteProfiles(activeSlug);
+      if (data.summary) setSummary(data.summary);
+      await loadCandidates(activeSlug);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRetryingIncomplete(false);
     }
   };
 
@@ -314,7 +334,26 @@ export default function SourcingScreen() {
           <div className="sourcing__results-head">
             <h2 className="sourcing__results-title">Results</h2>
             <span className="mono sourcing__results-count">{candidates.length}</span>
+            {incompleteCount > 0 && (
+              <button
+                type="button"
+                className="btn btn--ghost sourcing__retry-incomplete"
+                onClick={handleRetryIncomplete}
+                disabled={retryingIncomplete || busy}
+              >
+                {retryingIncomplete
+                  ? 'Retrying incomplete…'
+                  : `Retry incomplete (${incompleteCount})`}
+              </button>
+            )}
           </div>
+          {incompleteCount > 0 && (
+            <p className="sourcing__incomplete-banner mono" role="status">
+              {incompleteCount} thin profile
+              {incompleteCount === 1 ? '' : 's'} — needs re-pull (Full enrich
+              failed). Not scored until upgraded.
+            </p>
+          )}
           <div className="sourcing__table-wrap">
             <table className="sourcing-table">
               <thead>
@@ -340,12 +379,34 @@ export default function SourcingScreen() {
                   const titleCo = [c.current_title, c.current_company]
                     .filter(Boolean)
                     .join(' @ ');
+                  const incomplete = c.is_complete_profile === false;
                   return (
-                    <tr key={c.id || c.linkedin_url}>
-                      <td>{name}</td>
+                    <tr
+                      key={c.id || c.linkedin_url}
+                      className={
+                        incomplete ? 'sourcing-table__row--incomplete' : undefined
+                      }
+                    >
+                      <td>
+                        <div className="sourcing-table__name">
+                          <span>{name}</span>
+                          {incomplete && (
+                            <span
+                              className="sourcing-table__badge"
+                              title="Full profile enrich failed — Short stub only"
+                            >
+                              thin profile — needs re-pull
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td>{titleCo || '—'}</td>
                       <td>{c.location || '—'}</td>
-                      <td className="sourcing-table__headline">{c.headline || '—'}</td>
+                      <td className="sourcing-table__headline">
+                        {incomplete
+                          ? '—'
+                          : c.headline || '—'}
+                      </td>
                       <td>
                         {c.linkedin_url ? (
                           <a

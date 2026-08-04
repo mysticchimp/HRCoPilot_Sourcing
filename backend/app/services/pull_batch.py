@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -24,6 +25,12 @@ from app.apify.client import (
 from app.models import Candidate, PullBatch, Role, RoleCandidate
 
 logger = logging.getLogger("sourcing.pull")
+
+# Transient LinkedIn/Apify timeouts on Full mode — retry before Short fallback.
+FULL_ENRICH_RETRIES = 2
+FULL_ENRICH_RETRY_BACKOFF_SECS = 5
+
+INCOMPLETE_REASON = "insufficient data — not scored (thin Short profile)"
 
 
 def _transient_result(
@@ -48,6 +55,126 @@ def _normalize_url(url: str | None) -> str | None:
         return None
     u = url.strip().split("?")[0].rstrip("/")
     return u or None
+
+
+def _is_complete_apify_profile(profile: dict | None) -> bool:
+    """True when the Apify item carries Full-mode substance (not a Short stub)."""
+    if not profile or not isinstance(profile, dict):
+        return False
+    exp = profile.get("experience")
+    if isinstance(exp, list) and len(exp) > 0:
+        return True
+    skills = profile.get("skills")
+    if isinstance(skills, list) and len(skills) > 0:
+        return True
+    about = profile.get("about")
+    if isinstance(about, str) and about.strip():
+        return True
+    return False
+
+
+def _index_full_profiles(
+    profiles: list, by_url: dict[str, dict], by_id: dict[str, dict]
+) -> int:
+    """Merge Full items into URL/id indexes. Returns count missing linkedinUrl."""
+    missing_url = 0
+    for p in profiles or []:
+        if not isinstance(p, dict):
+            continue
+        u = _normalize_url(p.get("linkedinUrl"))
+        if u:
+            by_url[u] = p
+        else:
+            missing_url += 1
+        pid = p.get("id") or p.get("profileIdInSearch")
+        if pid is not None:
+            by_id[str(pid)] = p
+    return missing_url
+
+
+def _resolve_full_profile(
+    url: str,
+    *,
+    by_url: dict[str, dict],
+    by_id: dict[str, dict],
+    short_by_url: dict[str, dict],
+) -> dict | None:
+    profile = by_url.get(url)
+    if profile and _is_complete_apify_profile(profile):
+        return profile
+    short = short_by_url.get(url) or {}
+    sid = short.get("id") or short.get("profileIdInSearch")
+    if sid is not None:
+        by_id_hit = by_id.get(str(sid))
+        if by_id_hit and _is_complete_apify_profile(by_id_hit):
+            return by_id_hit
+    return None
+
+
+def _retry_full_enrich_for_missing(
+    *,
+    full_input: dict,
+    missing_urls: list[str],
+    by_url: dict[str, dict],
+    by_id: dict[str, dict],
+    short_by_url: dict[str, dict],
+) -> tuple[str | None, str | None]:
+    """Re-run Full search up to FULL_ENRICH_RETRIES times for unresolved URLs.
+
+    Batches retries (same search filters/page) — per-URL profileUrls enrich does
+    not work for Sales-Nav /in/ACwAA… links. Returns (last_status, last_run_id).
+    """
+    last_status: str | None = None
+    last_run_id: str | None = None
+    pending = list(missing_urls)
+    for attempt in range(1, FULL_ENRICH_RETRIES + 1):
+        if not pending:
+            break
+        logger.info(
+            "pull_batch Full enrich retry %s/%s for %s unresolved URLs "
+            "(backoff=%ss)",
+            attempt,
+            FULL_ENRICH_RETRIES,
+            len(pending),
+            FULL_ENRICH_RETRY_BACKOFF_SECS,
+        )
+        time.sleep(FULL_ENRICH_RETRY_BACKOFF_SECS)
+        try:
+            profiles, last_status, last_run_id = fetch_profiles(full_input)
+        except ApifyTransientError as e:
+            logger.warning(
+                "pull_batch Full enrich retry %s failed transiently status=%s "
+                "run_id=%s",
+                attempt,
+                e.status,
+                e.run_id,
+            )
+            last_status = e.status
+            last_run_id = e.run_id
+            continue
+        _index_full_profiles(profiles, by_url, by_id)
+        logger.info(
+            "pull_batch Full enrich retry %s done run_id=%s status=%s "
+            "raw_count=%s",
+            attempt,
+            last_run_id,
+            last_status,
+            len(profiles) if profiles else 0,
+        )
+        still: list[str] = []
+        for url in pending:
+            if _resolve_full_profile(
+                url, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+            ):
+                logger.info(
+                    "pull_batch Full enrich retry recovered url=%s attempt=%s",
+                    url,
+                    attempt,
+                )
+            else:
+                still.append(url)
+        pending = still
+    return last_status, last_run_id
 
 
 def _seen_urls_for_role(db: Session, role_id: uuid.UUID) -> set[str]:
@@ -104,11 +231,18 @@ def _log_apify_call(
     return row
 
 
-def _upsert_candidate(db: Session, raw_apify_item: dict, display: dict) -> Candidate:
+def _upsert_candidate(
+    db: Session,
+    raw_apify_item: dict,
+    display: dict,
+    *,
+    is_complete: bool,
+) -> Candidate:
     """Persist one candidate.
 
-    raw_apify_item — untouched Apify dataset item (Full mode) → raw_profile JSONB.
+    raw_apify_item — untouched Apify dataset item → raw_profile JSONB.
     display — compact() output used ONLY for flattened UI columns.
+    is_complete — False when storing a Short stub after Full enrich failed.
     """
     url = _normalize_url(display.get("linkedinUrl")) or _normalize_url(
         raw_apify_item.get("linkedinUrl")
@@ -138,9 +272,10 @@ def _upsert_candidate(db: Session, raw_apify_item: dict, display: dict) -> Candi
     about = raw_apify_item.get("about")
     exp = raw_apify_item.get("experience")
     logger.info(
-        "_upsert_candidate url=%s raw_keys=%s about_chars=%s experience_len=%s "
-        "education_len=%s skills_len=%s",
+        "_upsert_candidate url=%s is_complete=%s raw_keys=%s about_chars=%s "
+        "experience_len=%s education_len=%s skills_len=%s",
         url,
+        is_complete,
         sorted(raw_apify_item.keys())[:24],
         len(about) if isinstance(about, str) else (0 if about is None else -1),
         len(exp) if isinstance(exp, list) else 0,
@@ -166,7 +301,10 @@ def _upsert_candidate(db: Session, raw_apify_item: dict, display: dict) -> Candi
         )
         existing.location = display.get("location") or existing.location
         existing.top_skills = display.get("topSkills") or existing.top_skills
-        existing.raw_profile = raw_apify_item
+        # Prefer complete Full profiles; never downgrade a complete row to Short.
+        if is_complete or not existing.is_complete_profile:
+            existing.raw_profile = raw_apify_item
+            existing.is_complete_profile = is_complete
         db.flush()
         return existing
 
@@ -181,6 +319,7 @@ def _upsert_candidate(db: Session, raw_apify_item: dict, display: dict) -> Candi
         location=display.get("location"),
         top_skills=display.get("topSkills"),
         raw_profile=raw_apify_item,
+        is_complete_profile=is_complete,
         first_seen_at=datetime.now(timezone.utc),
     )
     db.add(cand)
@@ -199,6 +338,7 @@ def _candidate_row(c: Candidate) -> dict:
         "current_company": c.current_company,
         "location": c.location,
         "top_skills": c.top_skills,
+        "is_complete_profile": bool(c.is_complete_profile),
     }
 
 
@@ -390,6 +530,7 @@ def _pull_batch_inner(
             ),
             "batch_id": None,
             "pages_scanned": pages_scanned,
+            "incomplete_count": 0,
         }
 
     mode = retrieval.get("profileScraperMode") or "Full"
@@ -419,6 +560,39 @@ def _pull_batch_inner(
         len(target_urls),
     )
 
+    by_url: dict[str, dict] = {}
+    by_id: dict[str, dict] = {}
+    full_missing_url = _index_full_profiles(profiles, by_url, by_id)
+    logger.info(
+        "pull_batch Full search URL index size=%s id_index=%s "
+        "missing_linkedinUrl=%s target_urls=%s overlap_by_url=%s",
+        len(by_url),
+        len(by_id),
+        full_missing_url,
+        len(target_urls),
+        len(set(by_url) & set(target_urls)),
+    )
+
+    unresolved = [
+        u
+        for u in target_urls
+        if not _resolve_full_profile(
+            u, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+        )
+    ]
+    if unresolved:
+        retry_status, retry_run_id = _retry_full_enrich_for_missing(
+            full_input=full_input,
+            missing_urls=unresolved,
+            by_url=by_url,
+            by_id=by_id,
+            short_by_url=short_by_url,
+        )
+        if retry_run_id:
+            run_id = retry_run_id
+        if retry_status:
+            status = retry_status
+
     batch_number = _next_batch_number(db, role_id)
     batch = _log_apify_call(
         db,
@@ -433,31 +607,10 @@ def _pull_batch_inner(
             "retrieval": retrieval,
             "actor_status": status,
             "probe_pages": pages_scanned,
-            "full_enrich_raw_count": len(profiles) if profiles else 0,
+            "full_enrich_raw_count": len(by_url),
+            "full_enrich_retries": FULL_ENRICH_RETRIES,
             "actor_input": full_input,
         },
-    )
-
-    by_url: dict[str, dict] = {}
-    by_id: dict[str, dict] = {}
-    full_missing_url = 0
-    for p in profiles:
-        u = _normalize_url(p.get("linkedinUrl"))
-        if u:
-            by_url[u] = p
-        else:
-            full_missing_url += 1
-        pid = p.get("id") or p.get("profileIdInSearch")
-        if pid is not None:
-            by_id[str(pid)] = p
-    logger.info(
-        "pull_batch Full search URL index size=%s id_index=%s "
-        "missing_linkedinUrl=%s target_urls=%s overlap_by_url=%s",
-        len(by_url),
-        len(by_id),
-        full_missing_url,
-        len(target_urls),
-        len(set(by_url) & set(target_urls)),
     )
 
     stored: list[Candidate] = []
@@ -466,19 +619,14 @@ def _pull_batch_inner(
     used_short_fallback = 0
     skipped_no_profile = 0
     for i, url in enumerate(target_urls):
-        # Prefer Full search item (has about/experience). Match by URL, then by
-        # Short-item id if LinkedIn URL forms differ across modes.
-        profile = by_url.get(url)
-        source = "full"
-        if not profile:
-            short = short_by_url.get(url) or {}
-            sid = short.get("id") or short.get("profileIdInSearch")
-            if sid is not None:
-                profile = by_id.get(str(sid))
+        profile = _resolve_full_profile(
+            url, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+        )
+        is_complete = True
         if not profile:
             # Last resort: Short hit — incomplete for ML (no about/experience).
             profile = short_by_url.get(url)
-            source = "short_fallback"
+            is_complete = False
         if not profile:
             skipped_no_profile += 1
             logger.info(
@@ -486,17 +634,16 @@ def _pull_batch_inner(
                 url,
             )
             continue
-        if source == "short_fallback":
+        if not is_complete:
             used_short_fallback += 1
             logger.warning(
-                "pull_batch storing Short fallback as raw_profile (no about/"
-                "experience) url=%s — Full search miss",
+                "pull_batch storing Short fallback as incomplete raw_profile "
+                "url=%s — Full search miss after retries",
                 url,
             )
 
         display = compact(profile, i)
-        # raw_profile = untouched Apify item; display columns from compact() only.
-        cand = _upsert_candidate(db, profile, display)
+        cand = _upsert_candidate(db, profile, display, is_complete=is_complete)
         upserted += 1
         result = db.execute(
             pg_insert(RoleCandidate)
@@ -536,16 +683,23 @@ def _pull_batch_inner(
         page,
     )
 
+    incomplete_n = sum(1 for c in stored if not c.is_complete_profile)
     summary = (
         f"Pulled {len(stored)} new (skipped {skipped_repeats} repeats "
         f"across {pages_scanned} pages)."
     )
+    if incomplete_n:
+        summary += (
+            f" {incomplete_n} incomplete (thin Short profile — needs re-pull)."
+        )
     logger.info(
-        "returning %s candidates to UI batch_id=%s run_id=%s status=%s summary=%s",
+        "returning %s candidates to UI batch_id=%s run_id=%s status=%s "
+        "incomplete=%s summary=%s",
         len(stored),
         batch.id,
         run_id,
         status,
+        incomplete_n,
         summary,
     )
     return {
@@ -556,6 +710,7 @@ def _pull_batch_inner(
         "pages_scanned": pages_scanned,
         "apify_run_id": run_id,
         "status": status,
+        "incomplete_count": incomplete_n,
     }
 
 
@@ -573,3 +728,179 @@ def list_role_candidates(db: Session, role_id: uuid.UUID) -> list[dict]:
         row["batch_id"] = str(batch_id) if batch_id else None
         out.append(row)
     return out
+
+
+def count_incomplete_for_role(db: Session, role_id: uuid.UUID) -> int:
+    return int(
+        db.execute(
+            select(func.count())
+            .select_from(Candidate)
+            .join(RoleCandidate, RoleCandidate.candidate_id == Candidate.id)
+            .where(
+                RoleCandidate.role_id == role_id,
+                Candidate.is_complete_profile.is_(False),
+            )
+        ).scalar()
+        or 0
+    )
+
+
+def list_incomplete_for_role(
+    db: Session, role_id: uuid.UUID
+) -> list[tuple[Candidate, RoleCandidate]]:
+    return list(
+        db.execute(
+            select(Candidate, RoleCandidate)
+            .join(RoleCandidate, RoleCandidate.candidate_id == Candidate.id)
+            .where(
+                RoleCandidate.role_id == role_id,
+                Candidate.is_complete_profile.is_(False),
+            )
+        ).all()
+    )
+
+
+def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]:
+    """Re-attempt Full enrich for existing incomplete candidates on this role."""
+    role = db.get(Role, role_id)
+    if not role:
+        raise ValueError(f"role {role_id} not found")
+
+    pairs = list_incomplete_for_role(db, role_id)
+    if not pairs:
+        return {
+            "upgraded": 0,
+            "still_incomplete": 0,
+            "summary": "No incomplete profiles to retry.",
+            "candidates": [],
+        }
+
+    incomplete = [cand for cand, _rc in pairs]
+    short_by_url: dict[str, dict] = {}
+    target_urls: list[str] = []
+    for cand in incomplete:
+        url = _normalize_url(cand.linkedin_url)
+        if not url:
+            continue
+        target_urls.append(url)
+        raw = cand.raw_profile if isinstance(cand.raw_profile, dict) else {}
+        short_by_url[url] = raw
+
+    retrieval = dict(role.retrieval or {})
+    pool_cap = int(retrieval.get("pool_cap") or 25)
+    actor_input = compile_retrieval({"retrieval": retrieval}, pool_cap)
+    mode = retrieval.get("profileScraperMode") or "Full"
+    last_page = max(1, int(role.last_page or 1))
+
+    full_input = dict(actor_input)
+    full_input["profileScraperMode"] = mode
+    full_input["startPage"] = 1
+    full_input["takePages"] = last_page
+    full_input["maxItems"] = max(len(target_urls) * 2, 25)
+
+    logger.info(
+        "retry_incomplete role_id=%s slug=%s targets=%s full_input=%s",
+        role_id,
+        role.slug,
+        len(target_urls),
+        json.dumps(full_input, default=str),
+    )
+
+    try:
+        profiles, status, run_id = fetch_profiles(full_input)
+    except ApifyTransientError as e:
+        logger.info(
+            "retry_incomplete Apify transient status=%s run_id=%s",
+            e.status,
+            e.run_id,
+        )
+        return {
+            "upgraded": 0,
+            "still_incomplete": len(incomplete),
+            "summary": SOURCE_SLOW_MESSAGE,
+            "error": "apify_transient",
+            "status": e.status,
+            "apify_run_id": e.run_id,
+            "candidates": [_candidate_row(c) for c in incomplete],
+        }
+
+    by_url: dict[str, dict] = {}
+    by_id: dict[str, dict] = {}
+    _index_full_profiles(profiles, by_url, by_id)
+
+    unresolved = [
+        u
+        for u in target_urls
+        if not _resolve_full_profile(
+            u, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+        )
+    ]
+    if unresolved:
+        retry_status, retry_run_id = _retry_full_enrich_for_missing(
+            full_input=full_input,
+            missing_urls=unresolved,
+            by_url=by_url,
+            by_id=by_id,
+            short_by_url=short_by_url,
+        )
+        if retry_run_id:
+            run_id = retry_run_id
+        if retry_status:
+            status = retry_status
+
+    batch_number = _next_batch_number(db, role_id)
+    batch = _log_apify_call(
+        db,
+        role_id=role_id,
+        batch_number=batch_number,
+        apify_run_id=run_id,
+        params_snapshot={
+            "profileScraperMode": mode,
+            "retry_incomplete": True,
+            "target_count": len(target_urls),
+            "actor_status": status,
+            "full_enrich_raw_count": len(by_url),
+            "actor_input": full_input,
+        },
+    )
+
+    upgraded: list[Candidate] = []
+    still: list[Candidate] = []
+    for i, cand in enumerate(incomplete):
+        url = _normalize_url(cand.linkedin_url)
+        if not url:
+            still.append(cand)
+            continue
+        profile = _resolve_full_profile(
+            url, by_url=by_url, by_id=by_id, short_by_url=short_by_url
+        )
+        if not profile:
+            still.append(cand)
+            continue
+        display = compact(profile, i)
+        updated = _upsert_candidate(db, profile, display, is_complete=True)
+        upgraded.append(updated)
+
+    role.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    summary = (
+        f"Retry incomplete: upgraded {len(upgraded)}, "
+        f"still incomplete {len(still)}."
+    )
+    logger.info(
+        "retry_incomplete done role_id=%s batch_id=%s upgraded=%s still=%s",
+        role_id,
+        batch.id,
+        len(upgraded),
+        len(still),
+    )
+    return {
+        "upgraded": len(upgraded),
+        "still_incomplete": len(still),
+        "summary": summary,
+        "batch_id": str(batch.id),
+        "apify_run_id": run_id,
+        "status": status,
+        "candidates": [_candidate_row(c) for c in upgraded + still],
+    }

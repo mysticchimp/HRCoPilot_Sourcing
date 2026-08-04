@@ -14,7 +14,7 @@ from app.db import get_db
 from app.models import Role
 from app.services import chat as chat_service
 from app.services import scoring as scoring_service
-from app.services.pull_batch import list_role_candidates, pull_batch
+from app.services.pull_batch import list_role_candidates, pull_batch, retry_incomplete_profiles
 from app.services.scoring import ScoringTransientError
 
 router = APIRouter(tags=["sourcing"])
@@ -167,7 +167,7 @@ def save_role_jd(slug: str, body: JdIn, db: Session = Depends(get_db)):
 def score_role(slug: str, db: Session = Depends(get_db)):
     role = _get_role_by_slug(db, slug)
     try:
-        cards = scoring_service.score_role(db, role)
+        result = scoring_service.score_role(db, role)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except ScoringTransientError as e:
@@ -181,21 +181,26 @@ def score_role(slug: str, db: Session = Depends(get_db)):
         "role": role.slug,
         "jd_text": role.jd_text,
         "has_jd": bool((role.jd_text or "").strip()),
-        "candidates": cards,
-        "count": len(cards),
+        "candidates": result.get("candidates") or [],
+        "count": result.get("count") or 0,
+        "skipped_incomplete": result.get("skipped_incomplete") or 0,
+        "incomplete_candidates": result.get("incomplete_candidates") or [],
+        "summary": result.get("summary"),
     }
 
 
 @protected.get("/roles/{slug}/scores")
 def get_scores(slug: str, db: Session = Depends(get_db)):
     role = _get_role_by_slug(db, slug)
-    cards = scoring_service.list_scored_candidates(db, role.id)
+    result = scoring_service.list_score_payload(db, role.id)
     return {
         "role": role.slug,
         "jd_text": role.jd_text,
         "has_jd": bool((role.jd_text or "").strip()),
-        "candidates": cards,
-        "count": len(cards),
+        "candidates": result["candidates"],
+        "count": result["count"],
+        "skipped_incomplete": result["skipped_incomplete"],
+        "incomplete_candidates": result["incomplete_candidates"],
     }
 
 
@@ -217,6 +222,30 @@ def pull_role_batch(
             "batch_id": None,
             "pages_scanned": 0,
             "error": "apify_transient",
+            "incomplete_count": 0,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong on our side — please try again.",
+        ) from None
+
+
+@protected.post("/roles/{slug}/retry-incomplete")
+def retry_incomplete(slug: str, db: Session = Depends(get_db)):
+    """Re-attempt Full enrichment for incomplete (Short stub) candidates."""
+    role = _get_role_by_slug(db, slug)
+    try:
+        return retry_incomplete_profiles(db, role.id)
+    except ApifyTransientError:
+        return {
+            "upgraded": 0,
+            "still_incomplete": 0,
+            "summary": SOURCE_SLOW_MESSAGE,
+            "error": "apify_transient",
+            "candidates": [],
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

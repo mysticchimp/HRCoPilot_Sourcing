@@ -128,3 +128,9 @@ export function scoreRole(slug) {
 export function fetchRoleScores(slug) {
   return request(`/roles/${encodeURIComponent(slug)}/scores`);
 }
+
+export function retryIncompleteProfiles(slug) {
+  return request(`/roles/${encodeURIComponent(slug)}/retry-incomplete`, {
+    method: 'POST',
+  });
+}

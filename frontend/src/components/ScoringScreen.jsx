@@ -96,6 +96,9 @@ export default function ScoringScreen() {
   const [jdText, setJdText] = useState('');
   const [hasJd, setHasJd] = useState(false);
   const [candidates, setCandidates] = useState([]);
+  const [skippedIncomplete, setSkippedIncomplete] = useState(0);
+  const [incompleteCandidates, setIncompleteCandidates] = useState([]);
+  const [scoreSummary, setScoreSummary] = useState(null);
   const [loading, setLoading] = useState(false);
   const [scoring, setScoring] = useState(false);
   const [savingJd, setSavingJd] = useState(false);
@@ -104,6 +107,9 @@ export default function ScoringScreen() {
   const loadScores = useCallback(async (slug) => {
     if (!slug) {
       setCandidates([]);
+      setIncompleteCandidates([]);
+      setSkippedIncomplete(0);
+      setScoreSummary(null);
       setJdText('');
       setHasJd(false);
       return;
@@ -114,11 +120,16 @@ export default function ScoringScreen() {
     try {
       const data = await fetchRoleScores(slug);
       setCandidates(data.candidates || []);
+      setIncompleteCandidates(data.incomplete_candidates || []);
+      setSkippedIncomplete(data.skipped_incomplete || 0);
+      setScoreSummary(null);
       setJdText(data.jd_text || '');
       setHasJd(Boolean(data.has_jd));
     } catch (err) {
       setError(err.message);
       setCandidates([]);
+      setIncompleteCandidates([]);
+      setSkippedIncomplete(0);
     } finally {
       setLoading(false);
     }
@@ -152,6 +163,9 @@ export default function ScoringScreen() {
     try {
       const data = await scoreRole(activeSlug);
       setCandidates(data.candidates || []);
+      setIncompleteCandidates(data.incomplete_candidates || []);
+      setSkippedIncomplete(data.skipped_incomplete || 0);
+      setScoreSummary(data.summary || null);
       setHasJd(Boolean(data.has_jd));
       if (data.jd_text != null) setJdText(data.jd_text);
       await refreshRoles();
@@ -163,8 +177,10 @@ export default function ScoringScreen() {
   };
 
   const hasScores = candidates.length > 0;
-  const showJdStep = Boolean(activeSlug) && !hasScores && !hasJd;
-  const showScoreCta = Boolean(activeSlug) && !hasScores && hasJd;
+  const showResults =
+    hasScores || (Boolean(scoreSummary) && skippedIncomplete > 0);
+  const showJdStep = Boolean(activeSlug) && !hasScores && !hasJd && !scoreSummary;
+  const showScoreCta = Boolean(activeSlug) && !hasScores && hasJd && !scoreSummary;
   const busy = loading || scoring || savingJd;
 
   return (
@@ -172,7 +188,7 @@ export default function ScoringScreen() {
       <header className="scoring__toolbar">
         <div className="scoring__brand">Scoring</div>
         <RolePicker busy={busy} />
-        {hasScores && activeSlug && (
+        {showResults && activeSlug && (
           <button
             type="button"
             className="btn btn--ghost"
@@ -264,17 +280,50 @@ export default function ScoringScreen() {
         </p>
       )}
 
-      {activeSlug && !loading && hasScores && (
+      {activeSlug && !loading && showResults && (
         <section className="scoring__results" aria-label="Scored candidates">
           <div className="scoring__results-head">
             <h2 className="scoring__section-title">Ranked candidates</h2>
             <span className="mono scoring__results-count">{candidates.length}</span>
           </div>
-          <div className="scoring__cards">
-            {candidates.map((c) => (
-              <ScoreCard key={c.id || c.candidate_id || c.linkedin_url} card={c} />
-            ))}
-          </div>
+          {skippedIncomplete > 0 && (
+            <p className="scoring__skip-banner mono" role="status">
+              {skippedIncomplete} candidate
+              {skippedIncomplete === 1 ? '' : 's'} skipped — incomplete profile
+              data
+              {scoreSummary ? ` · ${scoreSummary}` : ''}
+            </p>
+          )}
+          {candidates.length > 0 ? (
+            <div className="scoring__cards">
+              {candidates.map((c) => (
+                <ScoreCard key={c.id || c.candidate_id || c.linkedin_url} card={c} />
+              ))}
+            </div>
+          ) : (
+            <p className="scoring__section-body">
+              No complete profiles to rank. Retry Full enrich from Sourcing for
+              thin profiles.
+            </p>
+          )}
+          {incompleteCandidates.length > 0 && (
+            <div className="scoring__incomplete" aria-label="Incomplete profiles">
+              <h3 className="scoring__incomplete-title">Not scored</h3>
+              <ul className="scoring__incomplete-list">
+                {incompleteCandidates.map((c) => {
+                  const name = candidateName(c);
+                  return (
+                    <li key={c.id || c.candidate_id || c.linkedin_url}>
+                      <span>{name}</span>
+                      <span className="scoring__incomplete-status mono">
+                        insufficient data — not scored
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
         </section>
       )}
     </div>

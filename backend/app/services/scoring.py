@@ -14,7 +14,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import Candidate, Role, RoleCandidate
-from app.services.pull_batch import _candidate_row
+from app.services.pull_batch import (
+    INCOMPLETE_REASON,
+    _candidate_row,
+    list_incomplete_for_role,
+)
 
 logger = logging.getLogger("sourcing.scoring")
 
@@ -44,20 +48,49 @@ def _scored_card(cand: Candidate, rc: RoleCandidate) -> dict[str, Any]:
     row["matched_signals"] = list(rc.matched_signals or [])
     row["reasoning"] = rc.reasoning
     row["scored_at"] = rc.scored_at.isoformat() if rc.scored_at else None
+    row["score_status"] = "scored"
+    return row
+
+
+def _incomplete_card(cand: Candidate, rc: RoleCandidate | None = None) -> dict[str, Any]:
+    row = _candidate_row(cand)
+    row["candidate_id"] = str(cand.id)
+    row["total_score"] = None
+    row["component_breakdown"] = None
+    row["matched_signals"] = []
+    row["reasoning"] = INCOMPLETE_REASON
+    row["scored_at"] = rc.scored_at.isoformat() if rc and rc.scored_at else None
+    row["score_status"] = "insufficient_data"
     return row
 
 
 def list_scored_candidates(db: Session, role_id: uuid.UUID) -> list[dict[str, Any]]:
+    """Ranked scored candidates only (complete profiles with a real score)."""
     rows = db.execute(
         select(Candidate, RoleCandidate)
         .join(RoleCandidate, RoleCandidate.candidate_id == Candidate.id)
         .where(
             RoleCandidate.role_id == role_id,
             RoleCandidate.scored_at.is_not(None),
+            RoleCandidate.total_score.is_not(None),
+            Candidate.is_complete_profile.is_(True),
         )
         .order_by(RoleCandidate.total_score.desc().nullslast())
     ).all()
     return [_scored_card(cand, rc) for cand, rc in rows]
+
+
+def list_score_payload(db: Session, role_id: uuid.UUID) -> dict[str, Any]:
+    """Scored cards + incomplete skip list for UI."""
+    scored = list_scored_candidates(db, role_id)
+    incomplete_pairs = list_incomplete_for_role(db, role_id)
+    incomplete = [_incomplete_card(cand, rc) for cand, rc in incomplete_pairs]
+    return {
+        "candidates": scored,
+        "count": len(scored),
+        "skipped_incomplete": len(incomplete),
+        "incomplete_candidates": incomplete,
+    }
 
 
 def _load_role_candidates_for_scoring(
@@ -117,8 +150,8 @@ def _call_scoring_api(jd_text: str, candidates_payload: list[dict]) -> list[dict
     return cards
 
 
-def score_role(db: Session, role: Role) -> list[dict[str, Any]]:
-    """Score all candidates for a role via the scoring API and persist results."""
+def score_role(db: Session, role: Role) -> dict[str, Any]:
+    """Score complete candidates; skip thin Short stubs with a clear status."""
     jd_text = (role.jd_text or "").strip()
     if not jd_text:
         raise ValueError(
@@ -129,17 +162,55 @@ def score_role(db: Session, role: Role) -> list[dict[str, Any]]:
     if not pairs:
         raise ValueError("No sourced candidates for this role — pull candidates first.")
 
+    complete = [(c, rc) for c, rc in pairs if c.is_complete_profile]
+    incomplete = [(c, rc) for c, rc in pairs if not c.is_complete_profile]
+    now = datetime.now(timezone.utc)
+
+    # Clear any prior fabricated scores on incomplete rows.
+    for cand, rc in incomplete:
+        rc.total_score = None
+        rc.component_breakdown = None
+        rc.matched_signals = []
+        rc.reasoning = INCOMPLETE_REASON
+        rc.scored_at = None
+        logger.info(
+            "score_role skipping incomplete candidate_id=%s url=%s",
+            cand.id,
+            cand.linkedin_url,
+        )
+
+    if not complete:
+        role.updated_at = now
+        db.commit()
+        skipped = len(incomplete)
+        return {
+            "candidates": [],
+            "count": 0,
+            "skipped_incomplete": skipped,
+            "incomplete_candidates": [
+                _incomplete_card(c, rc) for c, rc in incomplete
+            ],
+            "summary": (
+                f"{skipped} candidates skipped — incomplete profile data "
+                "(no complete profiles to score)."
+            ),
+        }
+
     payload = [
         {
             "candidate_id": str(cand.id),
             "raw_profile": cand.raw_profile or {},
         }
-        for cand, _rc in pairs
+        for cand, _rc in complete
     ]
 
+    logger.info(
+        "score_role sending %s complete profiles (skipping %s incomplete)",
+        len(payload),
+        len(incomplete),
+    )
     cards = _call_scoring_api(jd_text, payload)
-    by_id = {str(cand.id): (cand, rc) for cand, rc in pairs}
-    now = datetime.now(timezone.utc)
+    by_id = {str(cand.id): (cand, rc) for cand, rc in complete}
 
     for card in cards:
         cid = str(card.get("candidate_id") or "")
@@ -157,7 +228,17 @@ def score_role(db: Session, role: Role) -> list[dict[str, Any]]:
 
     role.updated_at = now
     db.commit()
-    return list_scored_candidates(db, role.id)
+
+    result = list_score_payload(db, role.id)
+    skipped = result["skipped_incomplete"]
+    if skipped:
+        result["summary"] = (
+            f"Scored {result['count']}; {skipped} candidates skipped — "
+            "incomplete profile data."
+        )
+    else:
+        result["summary"] = f"Scored {result['count']} candidates."
+    return result
 
 
 def save_role_jd(db: Session, role: Role, jd_text: str) -> Role:
