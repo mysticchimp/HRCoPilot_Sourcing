@@ -1,4 +1,4 @@
-"""SQLAlchemy models matching migrations/001_init.sql (+ 002, 003)."""
+"""SQLAlchemy models matching migrations/001_init.sql (+ 002–005)."""
 
 from __future__ import annotations
 
@@ -23,6 +23,9 @@ class Role(Base):
     role_name: Mapped[str] = mapped_column(Text, nullable=False)
     client: Mapped[Optional[str]] = mapped_column(Text)
     retrieval: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Filters that actually returned hits after probe_with_relax
+    # ({"dropped_keys": [...], "actor_input": {...}}). Used by retry-incomplete.
+    effective_actor_input: Mapped[Optional[dict]] = mapped_column(JSONB)
     last_page: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     jd_text: Mapped[Optional[str]] = mapped_column(Text)
     archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

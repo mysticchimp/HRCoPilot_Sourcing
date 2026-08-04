@@ -32,6 +32,92 @@ FULL_ENRICH_RETRY_BACKOFF_SECS = 5
 
 INCOMPLETE_REASON = "insufficient data — not scored (thin Short profile)"
 
+# Pagination / mode are run-specific; filter snapshot keeps search constraints only.
+_ACTOR_RUN_KEYS = frozenset(
+    {"startPage", "takePages", "maxItems", "profileScraperMode"}
+)
+
+
+def _filter_snapshot(actor_input: dict) -> dict[str, Any]:
+    return {k: v for k, v in actor_input.items() if k not in _ACTOR_RUN_KEYS}
+
+
+def _dropped_actor_keys(original: dict, effective: dict) -> list[str]:
+    return [k for k in original if k not in effective]
+
+
+def _set_effective_actor_input(
+    role: Role, original: dict, effective: dict
+) -> None:
+    """Record which filters worked after probe_with_relax (does not alter relax)."""
+    dropped = _dropped_actor_keys(original, effective)
+    role.effective_actor_input = {
+        "dropped_keys": dropped,
+        "actor_input": _filter_snapshot(effective),
+    }
+    logger.info(
+        "persisted effective_actor_input role_id=%s dropped_keys=%s",
+        role.id,
+        dropped,
+    )
+
+
+def _resolve_retry_effective_input(
+    role: Role, compiled: dict
+) -> tuple[dict[str, Any], list[str], bool]:
+    """Pick working filters for retry-incomplete.
+
+    Prefer role.effective_actor_input from a prior pull; otherwise run the same
+    probe_with_relax path as the original pull (try full set, then drop
+    searchQuery first, etc.).
+    """
+    stored = (
+        role.effective_actor_input
+        if isinstance(role.effective_actor_input, dict)
+        else None
+    )
+    stored_input = (stored or {}).get("actor_input")
+    if isinstance(stored_input, dict) and stored_input:
+        effective = dict(stored_input)
+        dropped = list(
+            stored.get("dropped_keys")
+            if isinstance(stored.get("dropped_keys"), list)
+            else _dropped_actor_keys(compiled, effective)
+        )
+        logger.info(
+            "retry_incomplete using persisted effective filters dropped=%s",
+            dropped,
+        )
+        return effective, dropped, True
+
+    _pool_n, preview, effective = probe_with_relax(dict(compiled), start_page=1)
+    dropped = _dropped_actor_keys(compiled, effective)
+    _set_effective_actor_input(role, compiled, effective)
+    logger.info(
+        "retry_incomplete probe_with_relax done pool_n=%s preview_len=%s "
+        "dropped=%s effective=%s",
+        _pool_n,
+        len(preview) if preview else 0,
+        dropped,
+        json.dumps(_filter_snapshot(effective), default=str),
+    )
+    return effective, dropped, False
+
+
+def _build_retry_full_input(
+    effective: dict,
+    *,
+    mode: str,
+    last_page: int,
+    target_count: int,
+) -> dict[str, Any]:
+    full_input = dict(effective)
+    full_input["profileScraperMode"] = mode
+    full_input["startPage"] = 1
+    full_input["takePages"] = max(1, last_page)
+    full_input["maxItems"] = max(target_count * 2, 25)
+    return full_input
+
 
 def _transient_result(
     *,
@@ -426,6 +512,8 @@ def _pull_batch_inner(
                 effective_input, start_page=page
             )
             first_page = False
+            # Persist working filters so retry-incomplete / re-pulls can reuse them.
+            _set_effective_actor_input(role, actor_input, effective_input)
         else:
             _pool_n, preview = probe_pool(effective_input, start_page=page)
 
@@ -788,21 +876,30 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
 
     retrieval = dict(role.retrieval or {})
     pool_cap = int(retrieval.get("pool_cap") or 25)
-    actor_input = compile_retrieval({"retrieval": retrieval}, pool_cap)
+    compiled = compile_retrieval({"retrieval": retrieval}, pool_cap)
     mode = retrieval.get("profileScraperMode") or "Full"
     last_page = max(1, int(role.last_page or 1))
 
-    full_input = dict(actor_input)
-    full_input["profileScraperMode"] = mode
-    full_input["startPage"] = 1
-    full_input["takePages"] = last_page
-    full_input["maxItems"] = max(len(target_urls) * 2, 25)
+    # Same as original pull: don't assume stored retrieval filters work as-is.
+    # Prefer persisted working filters; else probe_with_relax (drop searchQuery first).
+    effective_input, dropped_keys, used_persisted = _resolve_retry_effective_input(
+        role, compiled
+    )
+    full_input = _build_retry_full_input(
+        effective_input,
+        mode=mode,
+        last_page=last_page,
+        target_count=len(target_urls),
+    )
 
     logger.info(
-        "retry_incomplete role_id=%s slug=%s targets=%s full_input=%s",
+        "retry_incomplete role_id=%s slug=%s targets=%s used_persisted=%s "
+        "dropped_keys=%s full_input=%s",
         role_id,
         role.slug,
         len(target_urls),
+        used_persisted,
+        dropped_keys,
         json.dumps(full_input, default=str),
     )
 
@@ -823,6 +920,47 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
             "apify_run_id": e.run_id,
             "candidates": [_candidate_row(c) for c in incomplete],
         }
+
+    # Persisted filters may go stale — rediscover via probe_with_relax if empty.
+    if not profiles and used_persisted:
+        logger.info(
+            "retry_incomplete persisted filters returned 0 profiles; "
+            "rediscovering via probe_with_relax"
+        )
+        _pool_n, _preview, effective_input = probe_with_relax(
+            dict(compiled), start_page=1
+        )
+        dropped_keys = _dropped_actor_keys(compiled, effective_input)
+        _set_effective_actor_input(role, compiled, effective_input)
+        full_input = _build_retry_full_input(
+            effective_input,
+            mode=mode,
+            last_page=last_page,
+            target_count=len(target_urls),
+        )
+        logger.info(
+            "retry_incomplete after rediscover dropped=%s full_input=%s",
+            dropped_keys,
+            json.dumps(full_input, default=str),
+        )
+        try:
+            profiles, status, run_id = fetch_profiles(full_input)
+        except ApifyTransientError as e:
+            logger.info(
+                "retry_incomplete Apify transient after rediscover "
+                "status=%s run_id=%s",
+                e.status,
+                e.run_id,
+            )
+            return {
+                "upgraded": 0,
+                "still_incomplete": len(incomplete),
+                "summary": SOURCE_SLOW_MESSAGE,
+                "error": "apify_transient",
+                "status": e.status,
+                "apify_run_id": e.run_id,
+                "candidates": [_candidate_row(c) for c in incomplete],
+            }
 
     by_url: dict[str, dict] = {}
     by_id: dict[str, dict] = {}
@@ -860,6 +998,8 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
             "target_count": len(target_urls),
             "actor_status": status,
             "full_enrich_raw_count": len(by_url),
+            "dropped_keys": dropped_keys,
+            "used_persisted_filters": used_persisted,
             "actor_input": full_input,
         },
     )
@@ -888,12 +1028,16 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
         f"Retry incomplete: upgraded {len(upgraded)}, "
         f"still incomplete {len(still)}."
     )
+    if dropped_keys:
+        summary += f" (relaxed filters: dropped {', '.join(dropped_keys)})"
     logger.info(
-        "retry_incomplete done role_id=%s batch_id=%s upgraded=%s still=%s",
+        "retry_incomplete done role_id=%s batch_id=%s upgraded=%s still=%s "
+        "dropped_keys=%s",
         role_id,
         batch.id,
         len(upgraded),
         len(still),
+        dropped_keys,
     )
     return {
         "upgraded": len(upgraded),
@@ -902,5 +1046,6 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
         "batch_id": str(batch.id),
         "apify_run_id": run_id,
         "status": status,
+        "dropped_keys": dropped_keys,
         "candidates": [_candidate_row(c) for c in upgraded + still],
     }
