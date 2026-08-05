@@ -31,7 +31,9 @@ export default function AppShell() {
             src="/contra6-logo.png"
             alt="Contra6 Engineering"
           />
-          <span className="topbar__product">Sourcing</span>
+          <span className="topbar__product">
+            HR<span className="topbar__product-accent">CoPilot</span>
+          </span>
         </div>
         <div className="topbar__user">
           <span className="topbar__email">{user.email}</span>
@@ -58,6 +60,14 @@ export default function AppShell() {
             }
           >
             Scoring
+          </NavLink>
+          <NavLink
+            to="/review"
+            className={({ isActive }) =>
+              `sidebar__link${isActive ? ' sidebar__link--active' : ''}`
+            }
+          >
+            Review
           </NavLink>
         </nav>
         <main className="app-main">

@@ -49,6 +49,7 @@ def _scored_card(cand: Candidate, rc: RoleCandidate) -> dict[str, Any]:
     row["reasoning"] = rc.reasoning
     row["scored_at"] = rc.scored_at.isoformat() if rc.scored_at else None
     row["score_status"] = "scored"
+    row["review_status"] = getattr(rc, "review_status", None) or "reviewing"
     return row
 
 

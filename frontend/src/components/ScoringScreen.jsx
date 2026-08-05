@@ -90,6 +90,81 @@ function ScoreCard({ card }) {
   );
 }
 
+function JdModal({
+  jdText,
+  editing,
+  draft,
+  saving,
+  onDraftChange,
+  onEdit,
+  onSave,
+  onCancel,
+}) {
+  return (
+    <div className="scoring-modal" role="presentation">
+      <button
+        type="button"
+        className="scoring-modal__backdrop"
+        aria-label="Close"
+        onClick={onCancel}
+      />
+      <div
+        className="scoring-modal__panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="jd-modal-title"
+      >
+        <h2 id="jd-modal-title" className="scoring-modal__title">
+          Job description
+        </h2>
+        {editing ? (
+          <textarea
+            className="scoring__jd-input scoring-modal__textarea"
+            value={draft}
+            onChange={(e) => onDraftChange(e.target.value)}
+            disabled={saving}
+            aria-label="Edit job description"
+            autoFocus
+          />
+        ) : (
+          <div className="scoring-modal__body">{jdText || '—'}</div>
+        )}
+        <div className="scoring-modal__actions">
+          {editing ? (
+            <>
+              <button
+                type="button"
+                className="btn btn--primary"
+                onClick={onSave}
+                disabled={saving || !draft.trim()}
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={onCancel}
+                disabled={saving}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="btn btn--primary" onClick={onEdit}>
+                Edit
+              </button>
+              <button type="button" className="btn btn--ghost" onClick={onCancel}>
+                Cancel
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ScoringScreen() {
   const { activeSlug, activeRole, refreshRoles, setError: setRoleError } = useRole();
 
@@ -103,6 +178,22 @@ export default function ScoringScreen() {
   const [scoring, setScoring] = useState(false);
   const [savingJd, setSavingJd] = useState(false);
   const [error, setError] = useState(null);
+  const [jdModalOpen, setJdModalOpen] = useState(false);
+  const [jdEditing, setJdEditing] = useState(false);
+  const [jdDraft, setJdDraft] = useState('');
+  const [jdStaleScores, setJdStaleScores] = useState(false);
+
+  const closeJdModal = () => {
+    setJdModalOpen(false);
+    setJdEditing(false);
+    setJdDraft('');
+  };
+
+  const openJdModal = () => {
+    setJdDraft(jdText);
+    setJdEditing(false);
+    setJdModalOpen(true);
+  };
 
   const loadScores = useCallback(async (slug) => {
     if (!slug) {
@@ -112,11 +203,17 @@ export default function ScoringScreen() {
       setScoreSummary(null);
       setJdText('');
       setHasJd(false);
+      setJdStaleScores(false);
+      setJdModalOpen(false);
+      setJdEditing(false);
       return;
     }
     setLoading(true);
     setError(null);
     setRoleError(null);
+    setJdStaleScores(false);
+    setJdModalOpen(false);
+    setJdEditing(false);
     try {
       const data = await fetchRoleScores(slug);
       setCandidates(data.candidates || []);
@@ -156,6 +253,27 @@ export default function ScoringScreen() {
     }
   };
 
+  const handleSaveJdFromModal = async () => {
+    if (!activeSlug || !jdDraft.trim() || savingJd) return;
+    setSavingJd(true);
+    setError(null);
+    try {
+      const data = await saveRoleJd(activeSlug, jdDraft.trim());
+      const nextJd = data.jd_text || jdDraft.trim();
+      setHasJd(Boolean(data.has_jd));
+      setJdText(nextJd);
+      if (candidates.length > 0 || Boolean(scoreSummary)) {
+        setJdStaleScores(true);
+      }
+      await refreshRoles();
+      closeJdModal();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingJd(false);
+    }
+  };
+
   const handleScore = async () => {
     if (!activeSlug || scoring) return;
     setScoring(true);
@@ -168,6 +286,7 @@ export default function ScoringScreen() {
       setScoreSummary(data.summary || null);
       setHasJd(Boolean(data.has_jd));
       if (data.jd_text != null) setJdText(data.jd_text);
+      setJdStaleScores(false);
       await refreshRoles();
     } catch (err) {
       setError(err.message);
@@ -199,13 +318,26 @@ export default function ScoringScreen() {
           </button>
         )}
         {activeRole && hasJd && (
-          <span className="scoring__jd-badge mono">JD saved</span>
+          <button
+            type="button"
+            className="scoring__jd-badge mono"
+            onClick={openJdModal}
+            title="View or edit saved JD"
+          >
+            JD saved
+          </button>
         )}
       </header>
 
       {error && (
         <p className="scoring__error" role="alert">
           {error}
+        </p>
+      )}
+
+      {jdStaleScores && showResults && (
+        <p className="scoring__stale-banner mono" role="status">
+          JD updated — scores shown are from the previous JD. Re-score to update.
         </p>
       )}
 
@@ -325,6 +457,22 @@ export default function ScoringScreen() {
             </div>
           )}
         </section>
+      )}
+
+      {jdModalOpen && (
+        <JdModal
+          jdText={jdText}
+          editing={jdEditing}
+          draft={jdDraft}
+          saving={savingJd}
+          onDraftChange={setJdDraft}
+          onEdit={() => {
+            setJdDraft(jdText);
+            setJdEditing(true);
+          }}
+          onSave={handleSaveJdFromModal}
+          onCancel={closeJdModal}
+        />
       )}
     </div>
   );

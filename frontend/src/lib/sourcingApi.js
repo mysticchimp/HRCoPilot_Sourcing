@@ -129,6 +129,21 @@ export function fetchRoleScores(slug) {
   return request(`/roles/${encodeURIComponent(slug)}/scores`);
 }
 
+export function fetchReviewQueue(slug, status = 'reviewing') {
+  const q = new URLSearchParams({ status });
+  return request(`/roles/${encodeURIComponent(slug)}/review-queue?${q}`);
+}
+
+export function setReviewStatus(slug, candidateId, status) {
+  return request(
+    `/roles/${encodeURIComponent(slug)}/candidates/${encodeURIComponent(candidateId)}/review-status`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ status }),
+    },
+  );
+}
+
 export function retryIncompleteProfiles(slug) {
   return request(`/roles/${encodeURIComponent(slug)}/retry-incomplete`, {
     method: 'POST',

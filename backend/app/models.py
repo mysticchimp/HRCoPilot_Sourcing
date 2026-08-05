@@ -1,4 +1,4 @@
-"""SQLAlchemy models matching migrations/001_init.sql (+ 002–005)."""
+"""SQLAlchemy models matching migrations/001_init.sql (+ 002–006)."""
 
 from __future__ import annotations
 
@@ -88,6 +88,11 @@ class RoleCandidate(Base):
     matched_signals: Mapped[Optional[list]] = mapped_column(ARRAY(Text))
     reasoning: Mapped[Optional[str]] = mapped_column(Text)
     scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # reviewing | shortlisted | benched — default reviewing so newly scored
+    # candidates land in the Review queue automatically.
+    review_status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="reviewing", server_default="reviewing"
+    )
 
 
 class ChatSession(Base):

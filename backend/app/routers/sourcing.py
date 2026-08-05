@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -13,6 +14,7 @@ from app.auth import get_current_user
 from app.db import get_db
 from app.models import Role
 from app.services import chat as chat_service
+from app.services import review as review_service
 from app.services import scoring as scoring_service
 from app.services.pull_batch import list_role_candidates, pull_batch, retry_incomplete_profiles
 from app.services.scoring import ScoringTransientError
@@ -32,6 +34,10 @@ class PullIn(BaseModel):
 
 class JdIn(BaseModel):
     jd_text: str = Field(min_length=1)
+
+
+class ReviewStatusIn(BaseModel):
+    status: Literal["reviewing", "shortlisted", "benched"]
 
 
 class RoleOut(BaseModel):
@@ -201,6 +207,48 @@ def get_scores(slug: str, db: Session = Depends(get_db)):
         "count": result["count"],
         "skipped_incomplete": result["skipped_incomplete"],
         "incomplete_candidates": result["incomplete_candidates"],
+    }
+
+
+@protected.get("/roles/{slug}/review-queue")
+def get_review_queue(
+    slug: str,
+    status: Literal["reviewing", "shortlisted", "benched"] = Query(default="reviewing"),
+    db: Session = Depends(get_db),
+):
+    role = _get_role_by_slug(db, slug)
+    try:
+        result = review_service.list_review_queue(db, role.id, status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "role": role.slug,
+        "status": result["status"],
+        "counts": result["counts"],
+        "candidates": result["candidates"],
+        "count": result["count"],
+    }
+
+
+@protected.post("/roles/{slug}/candidates/{candidate_id}/review-status")
+def update_review_status(
+    slug: str,
+    candidate_id: UUID,
+    body: ReviewStatusIn,
+    db: Session = Depends(get_db),
+):
+    role = _get_role_by_slug(db, slug)
+    try:
+        result = review_service.set_review_status(
+            db, role.id, candidate_id, body.status
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "role": role.slug,
+        **result,
     }
 
 

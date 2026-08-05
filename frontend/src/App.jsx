@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import AppShell from './components/AppShell';
 import ArchivedRolesView from './components/ArchivedRolesView';
 import LoginPage from './components/LoginPage';
+import ReviewScreen from './components/ReviewScreen';
 import ScoringScreen from './components/ScoringScreen';
 import SourcingScreen from './components/SourcingScreen';
 import { AuthProvider } from './lib/auth';
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/sourcing" element={<SourcingScreen />} />
             <Route path="/sourcing/archived" element={<ArchivedRolesView />} />
             <Route path="/scoring" element={<ScoringScreen />} />
+            <Route path="/review" element={<ReviewScreen />} />
           </Route>
           <Route path="*" element={<Navigate to="/sourcing" replace />} />
         </Routes>
