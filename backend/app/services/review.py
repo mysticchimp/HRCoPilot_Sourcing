@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Candidate, RoleCandidate
+from app.services.career import build_career_summary
 from app.services.scoring import _scored_card
 
 ReviewStatus = Literal["reviewing", "shortlisted", "benched"]
@@ -95,6 +96,7 @@ def list_review_queue(
         card = _scored_card(cand, rc)
         card["review_status"] = rc.review_status
         card["skills"] = _skills_list(cand)
+        card["career"] = build_career_summary(cand.raw_profile)
         candidates.append(card)
 
     return {
