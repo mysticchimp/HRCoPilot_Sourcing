@@ -1631,6 +1631,19 @@ body {
   border-color: color-mix(in srgb, var(--accent) 28%, var(--line-2));
 }
 
+.review-card__summary {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .review-card__reasoning-body {
   margin: 0;
   color: var(--ink-2);

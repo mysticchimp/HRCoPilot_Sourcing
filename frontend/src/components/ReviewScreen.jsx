@@ -346,8 +346,7 @@ function ReviewCard({ card, rank, actions, busy, onAction }) {
     [card.component_breakdown],
   );
   const career = card.career || {};
-  const reasoning = card.reasoning || '';
-  const about = (career.about || '').trim();
+  const reasoning = (card.reasoning || '').trim();
   const yearsLabel = formatYearsExp(career.years_experience);
   const metaBits = [titleAtCompany(card), card.location, yearsLabel].filter(
     (x) => x && x !== '—',
@@ -407,10 +406,10 @@ function ReviewCard({ card, rank, actions, busy, onAction }) {
         </div>
       </header>
 
-      {about && (
+      {reasoning && (
         <section className="review-card__section" aria-label="Summary">
           <h3 className="review-card__section-title mono">Summary</h3>
-          <p className="review-card__reasoning-body">{about}</p>
+          <p className="review-card__summary">{reasoning}</p>
         </section>
       )}
 
