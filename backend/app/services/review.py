@@ -15,6 +15,39 @@ ReviewStatus = Literal["reviewing", "shortlisted", "benched"]
 VALID_STATUSES: tuple[str, ...] = ("reviewing", "shortlisted", "benched")
 
 
+def _skills_list(cand: Candidate) -> list[str]:
+    """Prefer candidates.top_skills; fall back to raw_profile.skills names."""
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def add(name: str) -> None:
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return
+        key = cleaned.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(cleaned)
+
+    raw_top = cand.top_skills or ""
+    if raw_top:
+        for part in raw_top.replace("•", ",").split(","):
+            add(part)
+
+    if len(out) < 4:
+        profile = cand.raw_profile if isinstance(cand.raw_profile, dict) else {}
+        skills = profile.get("skills") or []
+        if isinstance(skills, list):
+            for item in skills:
+                if isinstance(item, dict):
+                    add(str(item.get("name") or ""))
+                elif isinstance(item, str):
+                    add(item)
+
+    return out
+
+
 def _review_counts(db: Session, role_id: uuid.UUID) -> dict[str, int]:
     """Counts of scored candidates per review_status for a role."""
     rows = db.execute(
@@ -61,6 +94,7 @@ def list_review_queue(
     for cand, rc in rows:
         card = _scored_card(cand, rc)
         card["review_status"] = rc.review_status
+        card["skills"] = _skills_list(cand)
         candidates.append(card)
 
     return {

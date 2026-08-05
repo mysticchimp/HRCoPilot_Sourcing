@@ -1325,7 +1325,7 @@ body {
   align-items: stretch;
   gap: 1rem;
   padding: 1.25rem;
-  max-width: 48rem;
+  max-width: 56rem;
   width: 100%;
   margin: 0 auto;
 }
@@ -1359,18 +1359,45 @@ body {
   padding: 1.25rem 1.35rem;
   border: 1px solid var(--line);
   background: rgba(17, 17, 28, 0.72);
+  display: flex;
+  flex-direction: column;
+  gap: 1.15rem;
 }
 
-.review-card__top {
+.review-card__header {
   display: flex;
   align-items: flex-start;
+  justify-content: space-between;
   gap: 1rem;
   flex-wrap: wrap;
 }
 
-.review-card__identity {
+.review-card__header-main {
   flex: 1;
-  min-width: 0;
+  min-width: 12rem;
+}
+
+.review-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.65rem;
+}
+
+.review-card__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--line-2);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.review-card__badge--fit {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2));
+  color: var(--accent);
 }
 
 .review-card__name {
@@ -1380,47 +1407,89 @@ body {
   letter-spacing: -0.03em;
 }
 
-.review-card__title {
+.review-card__meta {
   margin: 0.35rem 0 0;
-  font-size: 0.95rem;
+  font-size: 0.875rem;
   color: var(--ink-2);
+  line-height: 1.45;
 }
 
-.review-card__location {
-  margin: 0.25rem 0 0;
-  font-size: 0.8125rem;
-  color: var(--ink-3);
-}
-
-.review-card__score-block {
+.review-card__header-actions {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.45rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
   flex-shrink: 0;
-}
-
-.review-card__score {
-  font-size: 1.15rem;
-  font-weight: 500;
-  color: var(--accent);
-  letter-spacing: -0.02em;
 }
 
 .review-card__link {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.3rem;
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--ink-2);
   text-decoration: none;
+  vertical-align: middle;
 }
 
 .review-card__link:hover {
   color: var(--accent);
+}
+
+.review-card__section {
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--line);
+}
+
+.review-card__section-title {
+  margin: 0 0 0.65rem;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 500;
+}
+
+.review-card__radar-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 0.25rem 0 0.5rem;
+}
+
+.review-radar {
+  width: min(100%, 320px);
+  height: auto;
+  overflow: visible;
+}
+
+.review-radar__grid {
+  fill: none;
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.review-radar__spoke {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.review-radar__area {
+  fill: color-mix(in srgb, var(--accent) 22%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.review-radar__dot {
+  fill: var(--accent);
+}
+
+.review-radar__label {
+  fill: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.02em;
 }
 
 .review-card__signals {
@@ -1428,7 +1497,7 @@ body {
   flex-wrap: wrap;
   gap: 0.35rem;
   list-style: none;
-  margin: 1rem 0 0;
+  margin: 0;
   padding: 0;
 }
 
@@ -1441,19 +1510,8 @@ body {
   color: var(--ink-2);
 }
 
-.review-card__reasoning {
-  margin-top: 1.15rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--line);
-}
-
-.review-card__reasoning-label {
-  margin: 0 0 0.45rem;
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  font-weight: 500;
+.review-card__signal--skill {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line-2));
 }
 
 .review-card__reasoning-body {
@@ -1464,17 +1522,10 @@ body {
   white-space: pre-wrap;
 }
 
-.review__actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.75rem;
-  flex-shrink: 0;
-}
-
 .review__action {
-  min-width: 9rem;
+  min-width: auto;
   justify-content: center;
+  padding: 0.5rem 0.75rem;
 }
 
 .review__action--bench {

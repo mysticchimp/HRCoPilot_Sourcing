@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import RolePicker from './RolePicker';
 import { useRole } from '../lib/roleContext';
 import { fetchReviewQueue, setReviewStatus } from '../lib/sourcingApi';
@@ -8,6 +8,37 @@ const TABS = [
   { id: 'reviewing', label: 'Reviewing' },
   { id: 'benched', label: 'Benched' },
 ];
+
+/** Preferred radar axis order — keys confirmed from stored component_breakdown. */
+const BREAKDOWN_ORDER = [
+  'similarity',
+  'title',
+  'skill',
+  'industry',
+  'language',
+  'location',
+  'seniority',
+  'experience',
+  'experience_relevance',
+  'education_relevance',
+  'qualification',
+  'attrition',
+];
+
+const BREAKDOWN_LABELS = {
+  similarity: 'Similarity',
+  title: 'Title fit',
+  skill: 'Skills',
+  industry: 'Sector fit',
+  language: 'Language',
+  location: 'Location',
+  attrition: 'Retention',
+  seniority: 'Seniority',
+  experience: 'Experience',
+  qualification: 'Qualification',
+  education_relevance: 'Education',
+  experience_relevance: 'Exp. relevance',
+};
 
 function ExternalLinkIcon() {
   return (
@@ -25,7 +56,7 @@ function ExternalLinkIcon() {
 
 function BenchIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path
         d="M18 6L6 18M6 6l12 12"
         stroke="currentColor"
@@ -38,7 +69,7 @@ function BenchIcon() {
 
 function ShortlistIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path
         d="M20 6L9 17l-5-5"
         stroke="currentColor"
@@ -50,9 +81,10 @@ function ShortlistIcon() {
   );
 }
 
-function formatScore(score) {
+/** total_score is stored 0–1; display as integer /10 (e.g. 0.548 → 5/10). */
+function formatFitOverTen(score) {
   if (score == null || Number.isNaN(Number(score))) return '—';
-  return `${Math.round(Number(score) * 100)}%`;
+  return `${Math.round(Number(score) * 10)}/10`;
 }
 
 function candidateName(c) {
@@ -83,7 +115,6 @@ function emptyMessage(tab, hasRole) {
   return 'No benched candidates yet.';
 }
 
-/** Primary actions for the active tab — labels adapt to context. */
 function actionButtonsForTab(tab) {
   if (tab === 'reviewing') {
     return [
@@ -103,6 +134,228 @@ function actionButtonsForTab(tab) {
   ];
 }
 
+function normalizeBreakdown(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  const known = BREAKDOWN_ORDER.filter((k) => raw[k] != null);
+  const extras = Object.keys(raw).filter((k) => !BREAKDOWN_ORDER.includes(k));
+  return [...known, ...extras].map((key) => {
+    const n = Number(raw[key]);
+    const value = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0;
+    return {
+      key,
+      label: BREAKDOWN_LABELS[key] || key.replace(/_/g, ' '),
+      value,
+    };
+  });
+}
+
+function parseSkills(card) {
+  if (Array.isArray(card.skills) && card.skills.length) {
+    return card.skills.map(String).filter(Boolean);
+  }
+  const raw = card.top_skills;
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
+  return String(raw)
+    .replace(/•/g, ',')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function polarToCartesian(cx, cy, radius, angleRad) {
+  return {
+    x: cx + radius * Math.sin(angleRad),
+    y: cy - radius * Math.cos(angleRad),
+  };
+}
+
+function RadarChart({ axes }) {
+  const size = 280;
+  const cx = size / 2;
+  const cy = size / 2;
+  const radius = 88;
+  const n = axes.length;
+  if (n < 3) return null;
+
+  const levels = [0.25, 0.5, 0.75, 1];
+  const angleAt = (i) => (i / n) * Math.PI * 2;
+
+  const gridPolygons = levels.map((lvl) =>
+    axes
+      .map((_, i) => {
+        const p = polarToCartesian(cx, cy, radius * lvl, angleAt(i));
+        return `${p.x},${p.y}`;
+      })
+      .join(' '),
+  );
+
+  const dataPoints = axes.map((axis, i) =>
+    polarToCartesian(cx, cy, radius * axis.value, angleAt(i)),
+  );
+  const dataPolygon = dataPoints.map((p) => `${p.x},${p.y}`).join(' ');
+
+  return (
+    <svg
+      className="review-radar"
+      viewBox={`0 0 ${size} ${size}`}
+      role="img"
+      aria-label="Role-fit component breakdown"
+    >
+      {gridPolygons.map((pts) => (
+        <polygon key={pts} className="review-radar__grid" points={pts} />
+      ))}
+      {axes.map((_, i) => {
+        const end = polarToCartesian(cx, cy, radius, angleAt(i));
+        return (
+          <line
+            key={`spoke-${i}`}
+            className="review-radar__spoke"
+            x1={cx}
+            y1={cy}
+            x2={end.x}
+            y2={end.y}
+          />
+        );
+      })}
+      <polygon className="review-radar__area" points={dataPolygon} />
+      {dataPoints.map((p, i) => (
+        <circle
+          key={`dot-${axes[i].key}`}
+          className="review-radar__dot"
+          cx={p.x}
+          cy={p.y}
+          r={2.5}
+        />
+      ))}
+      {axes.map((axis, i) => {
+        const labelR = radius + 28;
+        const p = polarToCartesian(cx, cy, labelR, angleAt(i));
+        return (
+          <text
+            key={`label-${axis.key}`}
+            className="review-radar__label"
+            x={p.x}
+            y={p.y}
+            textAnchor="middle"
+            dominantBaseline="middle"
+          >
+            {axis.label}
+          </text>
+        );
+      })}
+    </svg>
+  );
+}
+
+function ReviewCard({ card, rank, actions, busy, onAction }) {
+  const name = candidateName(card);
+  const signals = Array.isArray(card.matched_signals) ? card.matched_signals : [];
+  const skills = useMemo(() => parseSkills(card), [card]);
+  const axes = useMemo(
+    () => normalizeBreakdown(card.component_breakdown),
+    [card.component_breakdown],
+  );
+  const reasoning = card.reasoning || '';
+  const metaBits = [titleAtCompany(card), card.location].filter(
+    (x) => x && x !== '—',
+  );
+
+  return (
+    <article className="review-card">
+      <header className="review-card__header">
+        <div className="review-card__header-main">
+          <div className="review-card__badges">
+            <span className="review-card__badge mono">Rank #{rank}</span>
+            <span
+              className="review-card__badge review-card__badge--fit mono"
+              title={`raw total_score: ${card.total_score}`}
+            >
+              Fit {formatFitOverTen(card.total_score)}
+            </span>
+          </div>
+          <h2 className="review-card__name">{name}</h2>
+          <p className="review-card__meta">
+            {metaBits.join(' · ')}
+            {card.linkedin_url && (
+              <>
+                {' · '}
+                <a
+                  href={card.linkedin_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="review-card__link"
+                  aria-label={`Open LinkedIn for ${name}`}
+                >
+                  <ExternalLinkIcon />
+                  LinkedIn
+                </a>
+              </>
+            )}
+          </p>
+        </div>
+        <div className="review-card__header-actions">
+          {actions.map((a) => (
+            <button
+              key={a.status}
+              type="button"
+              className={`btn review__action review__action--${a.variant}`}
+              onClick={() => onAction(a.status)}
+              disabled={busy}
+            >
+              {a.icon === 'bench' && <BenchIcon />}
+              {a.icon === 'shortlist' && <ShortlistIcon />}
+              {a.label}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      {axes.length >= 3 && (
+        <section className="review-card__section" aria-label="Role-fit breakdown">
+          <h3 className="review-card__section-title mono">Role-fit breakdown</h3>
+          <div className="review-card__radar-wrap">
+            <RadarChart axes={axes} />
+          </div>
+        </section>
+      )}
+
+      {signals.length > 0 && (
+        <section className="review-card__section" aria-label="Strengths">
+          <h3 className="review-card__section-title mono">Strengths</h3>
+          <ul className="review-card__signals">
+            {signals.map((s) => (
+              <li key={s} className="review-card__signal">
+                {s}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {skills.length > 0 && (
+        <section className="review-card__section" aria-label="Top skills">
+          <h3 className="review-card__section-title mono">Top skills</h3>
+          <ul className="review-card__signals">
+            {skills.map((s) => (
+              <li key={s} className="review-card__signal review-card__signal--skill">
+                {s}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {reasoning && (
+        <section className="review-card__section" aria-label="Assessment">
+          <h3 className="review-card__section-title mono">Assessment</h3>
+          <p className="review-card__reasoning-body">{reasoning}</p>
+        </section>
+      )}
+    </article>
+  );
+}
+
 export default function ReviewScreen() {
   const { activeSlug } = useRole();
 
@@ -118,36 +371,30 @@ export default function ReviewScreen() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  // Keep latest values for keyboard handlers without re-binding constantly.
   const stateRef = useRef({});
   stateRef.current = { candidates, index, tab, busy, activeSlug, counts };
 
-  const loadQueue = useCallback(
-    async (slug, status) => {
-      if (!slug) {
-        setCandidates([]);
-        setCounts({ reviewing: 0, shortlisted: 0, benched: 0 });
-        setIndex(0);
-        return;
-      }
-      setLoading(true);
-      setError(null);
-      try {
-        const data = await fetchReviewQueue(slug, status);
-        setCandidates(data.candidates || []);
-        setCounts(
-          data.counts || { reviewing: 0, shortlisted: 0, benched: 0 },
-        );
-        setIndex(0);
-      } catch (err) {
-        setError(err.message);
-        setCandidates([]);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [],
-  );
+  const loadQueue = useCallback(async (slug, status) => {
+    if (!slug) {
+      setCandidates([]);
+      setCounts({ reviewing: 0, shortlisted: 0, benched: 0 });
+      setIndex(0);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchReviewQueue(slug, status);
+      setCandidates(data.candidates || []);
+      setCounts(data.counts || { reviewing: 0, shortlisted: 0, benched: 0 });
+      setIndex(0);
+    } catch (err) {
+      setError(err.message);
+      setCandidates([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     setTab('reviewing');
@@ -183,17 +430,16 @@ export default function ReviewScreen() {
       counts: currentCounts,
     } = stateRef.current;
     if (!slug || isBusy || !list.length) return;
-    const card = list[i];
-    if (!card) return;
-    const cid = card.candidate_id || card.id;
+    const current = list[i];
+    if (!current) return;
+    const cid = current.candidate_id || current.id;
     if (!cid) return;
-    // Already in this status (e.g. S on Shortlisted tab) — no-op.
     if (currentTab === nextStatus) return;
 
     const prevList = list;
     const prevCounts = { ...currentCounts };
     const prevIndex = i;
-    const nextList = list.filter((c) => candidateKey(c) !== candidateKey(card));
+    const nextList = list.filter((c) => candidateKey(c) !== candidateKey(current));
     const nextIndex =
       nextList.length === 0 ? 0 : Math.min(i, nextList.length - 1);
 
@@ -220,7 +466,6 @@ export default function ReviewScreen() {
     }
   }, []);
 
-  // Keyboard: ← → navigate; S shortlist; B bench
   useEffect(() => {
     const onKey = (e) => {
       if (e.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
@@ -247,9 +492,7 @@ export default function ReviewScreen() {
   const total = candidates.length;
   const card = total > 0 ? candidates[Math.min(index, total - 1)] : null;
   const actions = actionButtonsForTab(tab);
-  const name = card ? candidateName(card) : '';
-  const signals = card && Array.isArray(card.matched_signals) ? card.matched_signals : [];
-  const reasoning = card?.reasoning || '';
+  const rank = card ? index + 1 : 0;
 
   return (
     <div className="review">
@@ -290,15 +533,11 @@ export default function ReviewScreen() {
             ))}
           </nav>
 
-          {loading && (
-            <p className="review__status mono">Loading queue…</p>
-          )}
+          {loading && <p className="review__status mono">Loading queue…</p>}
 
           {!loading && !card && (
             <div className="review__empty">
-              <p className="review__empty-body">
-                {emptyMessage(tab, true)}
-              </p>
+              <p className="review__empty-body">{emptyMessage(tab, true)}</p>
             </div>
           )}
 
@@ -328,70 +567,13 @@ export default function ReviewScreen() {
                 </button>
               </div>
 
-              <article className="review-card">
-                <div className="review-card__top">
-                  <div className="review-card__identity">
-                    <h2 className="review-card__name">{name}</h2>
-                    <p className="review-card__title">{titleAtCompany(card)}</p>
-                    {card.location && (
-                      <p className="review-card__location">{card.location}</p>
-                    )}
-                  </div>
-                  <div className="review-card__score-block">
-                    <div
-                      className="review-card__score mono"
-                      title={`raw: ${card.total_score}`}
-                    >
-                      {formatScore(card.total_score)} Match
-                    </div>
-                    {card.linkedin_url && (
-                      <a
-                        href={card.linkedin_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="review-card__link"
-                        aria-label={`Open LinkedIn for ${name}`}
-                      >
-                        <ExternalLinkIcon />
-                        LinkedIn
-                      </a>
-                    )}
-                  </div>
-                </div>
-
-                {signals.length > 0 && (
-                  <ul className="review-card__signals">
-                    {signals.map((s) => (
-                      <li key={s} className="review-card__signal">
-                        {s}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-
-                {reasoning && (
-                  <div className="review-card__reasoning">
-                    <h3 className="review-card__reasoning-label mono">Summary</h3>
-                    <p className="review-card__reasoning-body">{reasoning}</p>
-                  </div>
-                )}
-              </article>
-
-              <div className="review__actions">
-                {actions.map((a) => (
-                  <button
-                    key={a.status}
-                    type="button"
-                    className={`btn review__action review__action--${a.variant}`}
-                    onClick={() => applyStatus(a.status)}
-                    disabled={busy}
-                  >
-                    {a.icon === 'bench' && <BenchIcon />}
-                    {a.icon === 'shortlist' && <ShortlistIcon />}
-                    {a.label}
-                  </button>
-                ))}
-              </div>
+              <ReviewCard
+                card={card}
+                rank={rank}
+                actions={actions}
+                busy={busy}
+                onAction={applyStatus}
+              />
 
               <p className="review__hints mono">
                 ← → navigate · S shortlist · B bench
