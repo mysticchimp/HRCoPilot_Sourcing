@@ -34,6 +34,16 @@ function titleAtCompany(c) {
   return [title, company].filter(Boolean).join(' @ ') || '—';
 }
 
+/** Pretty-print JSON for display when the role stores a scoring brief. */
+function formatJdForDisplay(text, hasParsedJd) {
+  if (!hasParsedJd || !text) return text || '';
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 function ScoreCard({ card }) {
   const [open, setOpen] = useState(false);
   const name = candidateName(card);
@@ -95,11 +105,14 @@ function JdModal({
   editing,
   draft,
   saving,
+  error,
+  hasParsedJd,
   onDraftChange,
   onEdit,
   onSave,
   onCancel,
 }) {
+  const displayBody = formatJdForDisplay(jdText, hasParsedJd);
   return (
     <div className="scoring-modal" role="presentation">
       <button
@@ -119,15 +132,31 @@ function JdModal({
         </h2>
         {editing ? (
           <textarea
-            className="scoring__jd-input scoring-modal__textarea"
+            className={`scoring__jd-input scoring-modal__textarea${
+              hasParsedJd || (draft || '').trim().startsWith('{')
+                ? ' scoring__jd-input--mono'
+                : ''
+            }`}
             value={draft}
             onChange={(e) => onDraftChange(e.target.value)}
             disabled={saving}
             aria-label="Edit job description"
             autoFocus
+            spellCheck={!((draft || '').trim().startsWith('{'))}
           />
         ) : (
-          <div className="scoring-modal__body">{jdText || '—'}</div>
+          <pre
+            className={`scoring-modal__body${
+              hasParsedJd ? ' scoring-modal__body--mono' : ''
+            }`}
+          >
+            {displayBody || '—'}
+          </pre>
+        )}
+        {error && (
+          <p className="scoring-modal__error" role="alert">
+            {error}
+          </p>
         )}
         <div className="scoring-modal__actions">
           {editing ? (
@@ -170,10 +199,12 @@ export default function ScoringScreen() {
 
   const [jdText, setJdText] = useState('');
   const [hasJd, setHasJd] = useState(false);
+  const [hasParsedJd, setHasParsedJd] = useState(false);
   const [candidates, setCandidates] = useState([]);
   const [skippedIncomplete, setSkippedIncomplete] = useState(0);
   const [incompleteCandidates, setIncompleteCandidates] = useState([]);
   const [scoreSummary, setScoreSummary] = useState(null);
+  const [scoringMode, setScoringMode] = useState(null);
   const [loading, setLoading] = useState(false);
   const [scoring, setScoring] = useState(false);
   const [savingJd, setSavingJd] = useState(false);
@@ -181,56 +212,80 @@ export default function ScoringScreen() {
   const [jdModalOpen, setJdModalOpen] = useState(false);
   const [jdEditing, setJdEditing] = useState(false);
   const [jdDraft, setJdDraft] = useState('');
+  const [jdModalError, setJdModalError] = useState(null);
   const [jdStaleScores, setJdStaleScores] = useState(false);
+
+  const applyJdMeta = (data, fallbackText) => {
+    const nextText = data.jd_text != null ? data.jd_text : fallbackText;
+    const parsed =
+      data.has_parsed_jd != null
+        ? Boolean(data.has_parsed_jd)
+        : data.jd_mode === 'parsed';
+    setHasJd(Boolean(data.has_jd));
+    setHasParsedJd(parsed);
+    if (nextText != null) {
+      setJdText(formatJdForDisplay(nextText, parsed));
+    }
+  };
 
   const closeJdModal = () => {
     setJdModalOpen(false);
     setJdEditing(false);
     setJdDraft('');
+    setJdModalError(null);
   };
 
   const openJdModal = () => {
-    setJdDraft(jdText);
+    setJdDraft(formatJdForDisplay(jdText, hasParsedJd));
     setJdEditing(false);
+    setJdModalError(null);
     setJdModalOpen(true);
   };
 
-  const loadScores = useCallback(async (slug) => {
-    if (!slug) {
-      setCandidates([]);
-      setIncompleteCandidates([]);
-      setSkippedIncomplete(0);
-      setScoreSummary(null);
-      setJdText('');
-      setHasJd(false);
+  const loadScores = useCallback(
+    async (slug) => {
+      if (!slug) {
+        setCandidates([]);
+        setIncompleteCandidates([]);
+        setSkippedIncomplete(0);
+        setScoreSummary(null);
+        setScoringMode(null);
+        setJdText('');
+        setHasJd(false);
+        setHasParsedJd(false);
+        setJdStaleScores(false);
+        setJdModalOpen(false);
+        setJdEditing(false);
+        setJdModalError(null);
+        return;
+      }
+      setLoading(true);
+      setError(null);
+      setRoleError(null);
       setJdStaleScores(false);
       setJdModalOpen(false);
       setJdEditing(false);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    setRoleError(null);
-    setJdStaleScores(false);
-    setJdModalOpen(false);
-    setJdEditing(false);
-    try {
-      const data = await fetchRoleScores(slug);
-      setCandidates(data.candidates || []);
-      setIncompleteCandidates(data.incomplete_candidates || []);
-      setSkippedIncomplete(data.skipped_incomplete || 0);
-      setScoreSummary(null);
-      setJdText(data.jd_text || '');
-      setHasJd(Boolean(data.has_jd));
-    } catch (err) {
-      setError(err.message);
-      setCandidates([]);
-      setIncompleteCandidates([]);
-      setSkippedIncomplete(0);
-    } finally {
-      setLoading(false);
-    }
-  }, [setRoleError]);
+      setJdModalError(null);
+      try {
+        const data = await fetchRoleScores(slug);
+        setCandidates(data.candidates || []);
+        setIncompleteCandidates(data.incomplete_candidates || []);
+        setSkippedIncomplete(data.skipped_incomplete || 0);
+        setScoreSummary(null);
+        setScoringMode(data.scoring_mode || null);
+        applyJdMeta(data, '');
+      } catch (err) {
+        setError(err.message);
+        setCandidates([]);
+        setIncompleteCandidates([]);
+        setSkippedIncomplete(0);
+        setScoringMode(null);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [setRoleError],
+  );
 
   useEffect(() => {
     loadScores(activeSlug);
@@ -243,8 +298,7 @@ export default function ScoringScreen() {
     setError(null);
     try {
       const data = await saveRoleJd(activeSlug, jdText.trim());
-      setHasJd(Boolean(data.has_jd));
-      setJdText(data.jd_text || jdText.trim());
+      applyJdMeta(data, jdText.trim());
       await refreshRoles();
     } catch (err) {
       setError(err.message);
@@ -256,19 +310,18 @@ export default function ScoringScreen() {
   const handleSaveJdFromModal = async () => {
     if (!activeSlug || !jdDraft.trim() || savingJd) return;
     setSavingJd(true);
+    setJdModalError(null);
     setError(null);
     try {
       const data = await saveRoleJd(activeSlug, jdDraft.trim());
-      const nextJd = data.jd_text || jdDraft.trim();
-      setHasJd(Boolean(data.has_jd));
-      setJdText(nextJd);
+      applyJdMeta(data, jdDraft.trim());
       if (candidates.length > 0 || Boolean(scoreSummary)) {
         setJdStaleScores(true);
       }
       await refreshRoles();
       closeJdModal();
     } catch (err) {
-      setError(err.message);
+      setJdModalError(err.message);
     } finally {
       setSavingJd(false);
     }
@@ -284,8 +337,8 @@ export default function ScoringScreen() {
       setIncompleteCandidates(data.incomplete_candidates || []);
       setSkippedIncomplete(data.skipped_incomplete || 0);
       setScoreSummary(data.summary || null);
-      setHasJd(Boolean(data.has_jd));
-      if (data.jd_text != null) setJdText(data.jd_text);
+      setScoringMode(data.scoring_mode || null);
+      applyJdMeta(data, jdText);
       setJdStaleScores(false);
       await refreshRoles();
     } catch (err) {
@@ -301,6 +354,7 @@ export default function ScoringScreen() {
   const showJdStep = Boolean(activeSlug) && !hasScores && !hasJd && !scoreSummary;
   const showScoreCta = Boolean(activeSlug) && !hasScores && hasJd && !scoreSummary;
   const busy = loading || scoring || savingJd;
+  const jdModeLabel = hasParsedJd ? 'Brief (JSON)' : 'Text (AI-parsed)';
 
   return (
     <div className="scoring">
@@ -318,14 +372,30 @@ export default function ScoringScreen() {
           </button>
         )}
         {activeRole && hasJd && (
-          <button
-            type="button"
-            className="scoring__jd-badge mono"
-            onClick={openJdModal}
-            title="View or edit saved JD"
-          >
-            JD saved
-          </button>
+          <div className="scoring__jd-badges">
+            <button
+              type="button"
+              className="scoring__jd-badge mono"
+              onClick={openJdModal}
+              title="View or edit saved JD"
+            >
+              JD saved
+            </button>
+            <span
+              className={`scoring__jd-mode mono${
+                hasParsedJd
+                  ? ' scoring__jd-mode--parsed'
+                  : ' scoring__jd-mode--text'
+              }`}
+              title={
+                hasParsedJd
+                  ? 'Structured scoring brief — used as-is (no AI parse)'
+                  : 'Plain JD text — Claude parses on score'
+              }
+            >
+              {jdModeLabel}
+            </span>
+          </div>
         )}
       </header>
 
@@ -347,7 +417,8 @@ export default function ScoringScreen() {
             Score a <span className="it">role</span>
           </h1>
           <p className="scoring__empty-body">
-            Select a sourced role to paste a job description and rank its candidates.
+            Select a sourced role to paste a job description (or a JSON scoring
+            brief) and rank its candidates.
           </p>
         </div>
       )}
@@ -360,18 +431,24 @@ export default function ScoringScreen() {
         <section className="scoring__jd" aria-label="Job description">
           <h2 className="scoring__section-title">Job description</h2>
           <p className="scoring__section-body">
-            Paste the JD for {activeRole?.role_name || activeSlug}. Scoring uses this
-            text against sourced profiles.
+            Paste the JD for {activeRole?.role_name || activeSlug}, or paste a
+            structured JSON scoring brief (role, company, responsibilities,
+            skills). Plain text is AI-parsed; JSON briefs are used as-is.
           </p>
           <form className="scoring__jd-form" onSubmit={handleSaveJd}>
             <textarea
-              className="scoring__jd-input"
+              className={`scoring__jd-input${
+                (jdText || '').trim().startsWith('{')
+                  ? ' scoring__jd-input--mono'
+                  : ''
+              }`}
               value={jdText}
               onChange={(e) => setJdText(e.target.value)}
               rows={14}
-              placeholder="Paste the full job description here…"
+              placeholder="Paste the full job description or a JSON scoring brief…"
               disabled={savingJd}
               aria-label="Job description"
+              spellCheck={!((jdText || '').trim().startsWith('{'))}
             />
             <button
               type="submit"
@@ -388,7 +465,9 @@ export default function ScoringScreen() {
         <section className="scoring__ready" aria-label="Ready to score">
           <h2 className="scoring__section-title">Ready to score</h2>
           <p className="scoring__section-body">
-            JD is saved. Run scoring against all sourced candidates for this role.
+            {hasParsedJd
+              ? 'Structured scoring brief is saved. Run scoring against all sourced candidates for this role (no AI parse).'
+              : 'JD is saved. Run scoring against all sourced candidates for this role.'}
           </p>
           <button
             type="button"
@@ -417,6 +496,22 @@ export default function ScoringScreen() {
           <div className="scoring__results-head">
             <h2 className="scoring__section-title">Ranked candidates</h2>
             <span className="mono scoring__results-count">{candidates.length}</span>
+            {scoringMode && (
+              <span
+                className={`scoring__jd-mode mono${
+                  scoringMode === 'parsed'
+                    ? ' scoring__jd-mode--parsed'
+                    : ' scoring__jd-mode--text'
+                }`}
+                title="Mode used for the latest score run"
+              >
+                {scoringMode === 'parsed'
+                  ? 'Scored via brief'
+                  : scoringMode === 'mixed'
+                    ? 'Mixed modes'
+                    : 'Scored via AI parse'}
+              </span>
+            )}
           </div>
           {skippedIncomplete > 0 && (
             <p className="scoring__skip-banner mono" role="status">
@@ -465,10 +560,16 @@ export default function ScoringScreen() {
           editing={jdEditing}
           draft={jdDraft}
           saving={savingJd}
-          onDraftChange={setJdDraft}
+          error={jdModalError}
+          hasParsedJd={hasParsedJd}
+          onDraftChange={(v) => {
+            setJdDraft(v);
+            if (jdModalError) setJdModalError(null);
+          }}
           onEdit={() => {
-            setJdDraft(jdText);
+            setJdDraft(formatJdForDisplay(jdText, hasParsedJd));
             setJdEditing(true);
+            setJdModalError(null);
           }}
           onSave={handleSaveJdFromModal}
           onCancel={closeJdModal}

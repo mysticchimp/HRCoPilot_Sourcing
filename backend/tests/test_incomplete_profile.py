@@ -171,6 +171,7 @@ def test_score_role_skips_incomplete_and_does_not_send_them():
     role = MagicMock()
     role.id = uuid.uuid4()
     role.jd_text = "HR Assistant"
+    role.jd_parsed = None
     role.updated_at = None
     db = MagicMock()
 
@@ -181,15 +182,18 @@ def test_score_role_skips_incomplete_and_does_not_send_them():
     ), patch.object(
         scoring_service,
         "_call_scoring_api",
-        return_value=[
-            {
-                "candidate_id": str(complete.id),
-                "total_score": 0.8,
-                "component_breakdown": {},
-                "matched_signals": [],
-                "reasoning": "ok",
-            }
-        ],
+        return_value=(
+            [
+                {
+                    "candidate_id": str(complete.id),
+                    "total_score": 0.8,
+                    "component_breakdown": {},
+                    "matched_signals": [],
+                    "reasoning": "ok",
+                }
+            ],
+            "llm",
+        ),
     ) as api, patch.object(
         scoring_service,
         "list_score_payload",
@@ -203,8 +207,9 @@ def test_score_role_skips_incomplete_and_does_not_send_them():
         result = scoring_service.score_role(db, role)
 
     assert api.call_count == 1
-    assert len(api.call_args[0][1]) == 1
-    assert api.call_args[0][1][0]["candidate_id"] == str(complete.id)
+    sent = api.call_args[0][0]
+    assert len(sent) == 1
+    assert sent[0]["candidate_id"] == str(complete.id)
     assert rc_i.total_score is None
     assert rc_i.reasoning == INCOMPLETE_REASON
     assert rc_i.scored_at is None

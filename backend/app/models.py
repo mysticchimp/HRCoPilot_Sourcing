@@ -1,4 +1,4 @@
-"""SQLAlchemy models matching migrations/001_init.sql (+ 002–006)."""
+"""SQLAlchemy models matching migrations/001_init.sql (+ 002–007)."""
 
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ class Role(Base):
     effective_actor_input: Mapped[Optional[dict]] = mapped_column(JSONB)
     last_page: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     jd_text: Mapped[Optional[str]] = mapped_column(Text)
+    # Structured JobRoleSchema JSON — when set, scoring sends parsed_jd (no Claude).
+    jd_parsed: Mapped[Optional[dict]] = mapped_column(JSONB)
     archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -88,6 +90,8 @@ class RoleCandidate(Base):
     matched_signals: Mapped[Optional[list]] = mapped_column(ARRAY(Text))
     reasoning: Mapped[Optional[str]] = mapped_column(Text)
     scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # "parsed" | "llm" — which /score mode produced this score (audit trail).
+    scoring_mode: Mapped[Optional[str]] = mapped_column(Text)
     # reviewing | shortlisted | benched — default reviewing so newly scored
     # candidates land in the Review queue automatically.
     review_status: Mapped[str] = mapped_column(

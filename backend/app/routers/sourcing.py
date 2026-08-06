@@ -60,7 +60,7 @@ def _role_out(r: Role) -> RoleOut:
         last_page=r.last_page,
         pool_cap=(r.retrieval or {}).get("pool_cap"),
         archived_at=r.archived_at.isoformat() if r.archived_at else None,
-        has_jd=bool((r.jd_text or "").strip()),
+        has_jd=scoring_service.role_has_jd(r),
     )
 
 
@@ -165,7 +165,9 @@ def save_role_jd(slug: str, body: JdIn, db: Session = Depends(get_db)):
         "ok": True,
         "role": role.slug,
         "jd_text": role.jd_text,
-        "has_jd": True,
+        "has_jd": scoring_service.role_has_jd(role),
+        "has_parsed_jd": bool(role.jd_parsed),
+        "jd_mode": "parsed" if role.jd_parsed else "text",
     }
 
 
@@ -186,7 +188,10 @@ def score_role(slug: str, db: Session = Depends(get_db)):
     return {
         "role": role.slug,
         "jd_text": role.jd_text,
-        "has_jd": bool((role.jd_text or "").strip()),
+        "has_jd": scoring_service.role_has_jd(role),
+        "has_parsed_jd": bool(role.jd_parsed),
+        "jd_mode": "parsed" if role.jd_parsed else "text",
+        "scoring_mode": result.get("scoring_mode"),
         "candidates": result.get("candidates") or [],
         "count": result.get("count") or 0,
         "skipped_incomplete": result.get("skipped_incomplete") or 0,
@@ -202,7 +207,10 @@ def get_scores(slug: str, db: Session = Depends(get_db)):
     return {
         "role": role.slug,
         "jd_text": role.jd_text,
-        "has_jd": bool((role.jd_text or "").strip()),
+        "has_jd": scoring_service.role_has_jd(role),
+        "has_parsed_jd": bool(role.jd_parsed),
+        "jd_mode": "parsed" if role.jd_parsed else "text",
+        "scoring_mode": result.get("scoring_mode"),
         "candidates": result["candidates"],
         "count": result["count"],
         "skipped_incomplete": result["skipped_incomplete"],
