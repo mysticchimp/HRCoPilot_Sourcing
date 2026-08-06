@@ -84,6 +84,21 @@ body {
   gap: 0.75rem;
 }
 
+.topbar__brand--link {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.topbar__brand--link:hover .topbar__product {
+  color: var(--ink-2);
+}
+
 .topbar__logo {
   display: block;
   height: 28px;
@@ -256,6 +271,96 @@ body {
   justify-content: center;
   padding: 0.85rem 1.1rem;
   font-size: 12px;
+}
+
+.chooser__main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background: transparent;
+}
+
+.chooser__panel {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 0.85rem;
+  margin: 0;
+  padding: clamp(2rem, 5vw, 4.5rem);
+  border: none;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background:
+    radial-gradient(700px 420px at 30% 20%, rgba(198, 255, 61, 0.07), transparent 60%),
+    var(--bg-2);
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.2s ease;
+}
+
+.chooser__panel:last-child {
+  border-right: none;
+  background:
+    radial-gradient(700px 420px at 70% 30%, rgba(122, 184, 255, 0.08), transparent 60%),
+    var(--bg);
+}
+
+.chooser__panel:hover {
+  background:
+    radial-gradient(800px 480px at 40% 25%, rgba(198, 255, 61, 0.14), transparent 55%),
+    var(--bg-2);
+}
+
+.chooser__panel:last-child:hover {
+  background:
+    radial-gradient(800px 480px at 60% 30%, rgba(122, 184, 255, 0.14), transparent 55%),
+    var(--bg-2);
+}
+
+.chooser__panel-label {
+  font-family: var(--font-mono);
+  font-size: clamp(2rem, 4vw, 3.25rem);
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.chooser__panel-hint {
+  font-family: var(--font-mono);
+  font-size: clamp(0.95rem, 1.5vw, 1.15rem);
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.chooser__panel-body {
+  max-width: 34rem;
+  margin-top: 0.75rem;
+  font-family: var(--font-sans);
+  font-size: clamp(1.15rem, 1.8vw, 1.4rem);
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+@media (max-width: 720px) {
+  .chooser__main {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 1fr;
+  }
+
+  .chooser__panel {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .chooser__panel:last-child {
+    border-bottom: none;
+  }
 }
 
 .scoring {

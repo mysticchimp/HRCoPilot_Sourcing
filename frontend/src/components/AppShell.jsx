@@ -25,7 +25,12 @@ export default function AppShell() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div className="topbar__brand">
+        <button
+          type="button"
+          className="topbar__brand topbar__brand--link"
+          onClick={() => navigate('/')}
+          aria-label="Back to workspace chooser"
+        >
           <img
             className="topbar__logo"
             src="/contra6-logo.png"
@@ -34,7 +39,7 @@ export default function AppShell() {
           <span className="topbar__product">
             HR<span className="topbar__product-accent">CoPilot</span>
           </span>
-        </div>
+        </button>
         <div className="topbar__user">
           <span className="topbar__email">{user.email}</span>
           <span className="topbar__role mono">{user.role}</span>
@@ -45,6 +50,13 @@ export default function AppShell() {
       </header>
       <div className="app-body">
         <nav className="sidebar" aria-label="Main">
+          <NavLink
+            to="/"
+            end
+            className="sidebar__link"
+          >
+            Home
+          </NavLink>
           <NavLink
             to="/sourcing"
             className={({ isActive }) =>

@@ -12,7 +12,7 @@ export default function LoginPage() {
   const [busy, setBusy] = useState(false);
 
   if (!loading && user) {
-    return <Navigate to="/sourcing" replace />;
+    return <Navigate to="/" replace />;
   }
 
   const handleSubmit = async (e) => {
@@ -22,7 +22,7 @@ export default function LoginPage() {
     try {
       const me = await apiLogin(email.trim(), password);
       loginSuccess(me);
-      navigate('/sourcing', { replace: true });
+      navigate('/', { replace: true });
     } catch (err) {
       setError(err.message || 'Login failed');
     } finally {

@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import AppShell from './components/AppShell';
 import ArchivedRolesView from './components/ArchivedRolesView';
+import ChooserPage from './components/ChooserPage';
 import LoginPage from './components/LoginPage';
 import ReviewScreen from './components/ReviewScreen';
 import ScoringScreen from './components/ScoringScreen';
@@ -14,6 +15,7 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/" element={<ChooserPage />} />
           <Route
             element={
               <RoleProvider>
@@ -21,13 +23,12 @@ export default function App() {
               </RoleProvider>
             }
           >
-            <Route index element={<Navigate to="/sourcing" replace />} />
             <Route path="/sourcing" element={<SourcingScreen />} />
             <Route path="/sourcing/archived" element={<ArchivedRolesView />} />
             <Route path="/scoring" element={<ScoringScreen />} />
             <Route path="/review" element={<ReviewScreen />} />
           </Route>
-          <Route path="*" element={<Navigate to="/sourcing" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>
