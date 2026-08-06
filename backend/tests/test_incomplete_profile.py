@@ -48,6 +48,27 @@ def test_resolve_prefers_full_by_id():
     assert got is full
 
 
+def test_linkedin_member_stem_only_for_acw_aco_never_vanity_slugs():
+    from app.services.pull_batch import _linkedin_member_stem
+
+    short_id = "ACwAADBdtwoB-gklyGL5mrQ3JXsvLE5_FUyR8kw"
+    full_id = "ACoAADBdtwoBFjcvcNOvf4QuK8JXnst1YbEZTbA"
+    assert _linkedin_member_stem(short_id) == "DBdtwoB"
+    assert _linkedin_member_stem(full_id) == "DBdtwoB"
+    assert _linkedin_member_stem(f"https://www.linkedin.com/in/{short_id}") == (
+        "DBdtwoB"
+    )
+
+    # Vanity slugs must never yield a stem (identity-collision bug).
+    assert _linkedin_member_stem(
+        "https://www.linkedin.com/in/abdullahkhere"
+    ) is None
+    assert _linkedin_member_stem(
+        "https://www.linkedin.com/in/abdullah-al-zadjali-2553b7275"
+    ) is None
+    assert _linkedin_member_stem("ashika-s-kumar-00a9041a7") is None
+
+
 def test_resolve_matches_acw_short_to_aco_full_via_stem():
     from app.services.pull_batch import (
         _index_full_profiles,
@@ -75,6 +96,9 @@ def test_resolve_matches_acw_short_to_aco_full_via_stem():
     by_id: dict = {}
     by_stem: dict = {}
     _index_full_profiles([full], by_url, by_id, by_stem)
+    # Vanity slug must not be indexed as a stem key.
+    assert "ashika-" not in by_stem
+    assert _linkedin_member_stem(full_id) in by_stem
     url = short["linkedinUrl"]
     got = _resolve_full_profile(
         url,
@@ -84,6 +108,39 @@ def test_resolve_matches_acw_short_to_aco_full_via_stem():
         by_stem=by_stem,
     )
     assert got is full
+
+
+def test_resolve_does_not_cross_match_vanity_slug_prefix_collision():
+    """abdullahkhere vs abdullah-al-zadjali share prefix 'abdulla' — must not merge."""
+    from app.services.pull_batch import _index_full_profiles, _resolve_full_profile
+
+    short = {
+        "id": "ACwAAEMoH6EBxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "linkedinUrl": "https://www.linkedin.com/in/ACwAAEMoH6EBxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "firstName": "Abdullah",
+        "currentPositions": [],
+    }
+    # Wrong person: Sales Engineer vanity slug that collides on first-7 'abdulla'
+    wrong_full = {
+        "id": "ACoAABqhTg4Byyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "linkedinUrl": "https://www.linkedin.com/in/abdullahkhere",
+        "headline": "Sales Engineer",
+        "experience": [{"position": "Sales Engineer"}],
+        "firstName": "Abdullah",
+        "lastName": "Khan",
+    }
+    by_url: dict = {}
+    by_id: dict = {}
+    by_stem: dict = {}
+    _index_full_profiles([wrong_full], by_url, by_id, by_stem)
+    got = _resolve_full_profile(
+        short["linkedinUrl"],
+        by_url=by_url,
+        by_id=by_id,
+        short_by_url={short["linkedinUrl"]: short},
+        by_stem=by_stem,
+    )
+    assert got is None
 
 
 def test_upsert_updates_existing_when_passed_even_if_url_differs():

@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -146,21 +146,24 @@ def _normalize_url(url: str | None) -> str | None:
 
 # Short search returns Sales-Nav ids (ACwAA…); Full returns member ids (ACoAA…).
 # After the AC[ow]AA prefix they share a stable 7-char stem for the same person.
-_LINKEDIN_ID_PREFIX_RE = re.compile(r"^AC[ow]AA", re.IGNORECASE)
-_LINKEDIN_ID_STEM_LEN = 7
+# NEVER derive a stem from public vanity slugs — first-7-char prefixes collide
+# across different people (e.g. abdullah-al-zadjali vs abdullahkhere → "abdulla").
+_LINKEDIN_MEMBER_ID_RE = re.compile(r"^AC[ow]AA(.{7})", re.IGNORECASE)
 
 
 def _linkedin_member_stem(value: str | None) -> str | None:
-    """Stable cross-mode id stem shared by ACwAA (Short) and ACoAA (Full)."""
+    """Stable 7-char stem shared by ACwAA (Short) and ACoAA (Full) member ids.
+
+    Returns None for public vanity slugs. Vanity URLs are not identity keys;
+    dedup those via exact linkedin_url only.
+    """
     if not value:
         return None
     s = str(value).strip()
     if "/in/" in s:
         s = s.split("/in/")[-1].split("?")[0].rstrip("/")
-    s = _LINKEDIN_ID_PREFIX_RE.sub("", s)
-    if len(s) < _LINKEDIN_ID_STEM_LEN:
-        return None
-    return s[:_LINKEDIN_ID_STEM_LEN]
+    m = _LINKEDIN_MEMBER_ID_RE.match(s)
+    return m.group(1) if m else None
 
 
 def _is_complete_apify_profile(profile: dict | None) -> bool:
@@ -364,13 +367,25 @@ def _log_apify_call(
 def _find_candidate_by_linkedin_stem(
     db: Session, stem: str
 ) -> Candidate | None:
-    """Find a candidate whose linkedin_url/raw id shares the ACw/ACo stem."""
+    """Find a candidate whose ACwAA/ACoAA member id shares ``stem``.
+
+    ``stem`` must come from ``_linkedin_member_stem`` (member ids only).
+    Public vanity slug URLs never participate — their stem is always None.
+    """
     if not stem:
         return None
-    # Sales-Nav URLs embed the full ACwAA… id; stem is the stable 7-char body.
+    # Sales-Nav / member-id URLs embed ACwAA… / ACoAA…; stem is the 7-char body.
+    # Restrict the prefilter to those URL shapes so vanity slugs that happen to
+    # contain the same 7 chars are never loaded or matched.
     rows = (
         db.execute(
-            select(Candidate).where(Candidate.linkedin_url.contains(stem))
+            select(Candidate).where(
+                Candidate.linkedin_url.contains(stem),
+                or_(
+                    Candidate.linkedin_url.ilike("%/in/ACwAA%"),
+                    Candidate.linkedin_url.ilike("%/in/ACoAA%"),
+                ),
+            )
         )
         .scalars()
         .all()
