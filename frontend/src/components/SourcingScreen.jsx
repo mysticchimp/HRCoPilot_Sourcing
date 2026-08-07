@@ -181,11 +181,22 @@ export default function SourcingScreen() {
     }
   };
 
-  const incompleteCount = candidates.filter((c) => c.is_complete_profile === false)
-    .length;
+  const incompleteCandidates = candidates.filter(
+    (c) => c.is_complete_profile === false
+  );
+  const retryableIncomplete = incompleteCandidates.filter(
+    (c) => c.enrich_status !== 'enrich_failed' && !c.enrich_retry_exhausted
+  );
+  const exhaustedIncomplete = incompleteCandidates.filter(
+    (c) => c.enrich_status === 'enrich_failed' || c.enrich_retry_exhausted
+  );
+  const incompleteCount = incompleteCandidates.length;
+  const retryableCount = retryableIncomplete.length;
+  const exhaustedCount = exhaustedIncomplete.length;
 
   const handleRetryIncomplete = async () => {
     if (!activeSlug || activeSlug === 'new' || retryingIncomplete) return;
+    if (retryableCount === 0) return;
     setRetryingIncomplete(true);
     setError(null);
     try {
@@ -334,7 +345,7 @@ export default function SourcingScreen() {
           <div className="sourcing__results-head">
             <h2 className="sourcing__results-title">Results</h2>
             <span className="mono sourcing__results-count">{candidates.length}</span>
-            {incompleteCount > 0 && (
+            {retryableCount > 0 && (
               <button
                 type="button"
                 className="btn btn--ghost sourcing__retry-incomplete"
@@ -343,15 +354,27 @@ export default function SourcingScreen() {
               >
                 {retryingIncomplete
                   ? 'Retrying incomplete…'
-                  : `Retry incomplete (${incompleteCount})`}
+                  : `Retry incomplete (${retryableCount})`}
               </button>
             )}
           </div>
           {incompleteCount > 0 && (
             <p className="sourcing__incomplete-banner mono" role="status">
-              {incompleteCount} thin profile
-              {incompleteCount === 1 ? '' : 's'} — needs re-pull (Full enrich
-              failed). Not scored until upgraded.
+              {retryableCount > 0 && (
+                <>
+                  {retryableCount} thin profile
+                  {retryableCount === 1 ? '' : 's'} — needs re-pull (Full enrich
+                  failed).
+                </>
+              )}
+              {retryableCount > 0 && exhaustedCount > 0 ? ' ' : null}
+              {exhaustedCount > 0 && (
+                <>
+                  {exhaustedCount} failed after 3 attempts — manual re-pull
+                  only (auto-retry stopped).
+                </>
+              )}{' '}
+              Not scored until upgraded.
             </p>
           )}
           <div className="sourcing__table-wrap">
@@ -380,11 +403,19 @@ export default function SourcingScreen() {
                     .filter(Boolean)
                     .join(' @ ');
                   const incomplete = c.is_complete_profile === false;
+                  const enrichFailed =
+                    incomplete &&
+                    (c.enrich_status === 'enrich_failed' ||
+                      c.enrich_retry_exhausted);
                   return (
                     <tr
                       key={c.id || c.linkedin_url}
                       className={
-                        incomplete ? 'sourcing-table__row--incomplete' : undefined
+                        incomplete
+                          ? enrichFailed
+                            ? 'sourcing-table__row--incomplete sourcing-table__row--enrich-failed'
+                            : 'sourcing-table__row--incomplete'
+                          : undefined
                       }
                     >
                       <td>
@@ -392,10 +423,20 @@ export default function SourcingScreen() {
                           <span>{name}</span>
                           {incomplete && (
                             <span
-                              className="sourcing-table__badge"
-                              title="Full profile enrich failed — Short stub only"
+                              className={
+                                enrichFailed
+                                  ? 'sourcing-table__badge sourcing-table__badge--failed'
+                                  : 'sourcing-table__badge'
+                              }
+                              title={
+                                enrichFailed
+                                  ? 'Full enrich failed 3 times — stopped auto-retry; needs manual re-pull'
+                                  : 'Full profile enrich failed — Short stub only'
+                              }
                             >
-                              thin profile — needs re-pull
+                              {enrichFailed
+                                ? 'failed after 3 attempts'
+                                : 'thin profile — needs re-pull'}
                             </span>
                           )}
                         </div>

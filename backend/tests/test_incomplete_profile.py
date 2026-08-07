@@ -394,6 +394,7 @@ def test_retry_incomplete_builds_full_input_without_search_query():
         "currentPositions": [{"title": "HR Assistant"}],
     }
     cand.is_complete_profile = False
+    cand.enrich_retry_count = 0
     cand.first_name = "Ashika"
     cand.last_name = "X"
     cand.headline = None
@@ -424,9 +425,12 @@ def test_retry_incomplete_builds_full_input_without_search_query():
     db.get.return_value = role
     batch = MagicMock()
     batch.id = uuid.uuid4()
+    pair = (cand, MagicMock())
 
     with patch.object(
-        pb, "list_incomplete_for_role", return_value=[(cand, MagicMock())]
+        pb, "list_incomplete_for_role", return_value=[pair]
+    ), patch.object(
+        pb, "list_retryable_incomplete_for_role", return_value=[pair]
     ), patch.object(
         pb,
         "compile_retrieval",
@@ -463,3 +467,150 @@ def test_retry_incomplete_builds_full_input_without_search_query():
     assert result["upgraded"] == 1
     assert result["still_incomplete"] == 0
     assert result["dropped_keys"] == ["searchQuery"]
+
+
+def test_retry_incomplete_skips_exhausted_without_apify_call():
+    from app.services import pull_batch as pb
+
+    role_id = uuid.uuid4()
+    role = MagicMock()
+    role.id = role_id
+    role.slug = "hr_assistant"
+    role.retrieval = {"pool_cap": 10, "profileScraperMode": "Full"}
+    role.last_page = 2
+    role.effective_actor_input = {"dropped_keys": [], "actor_input": {}}
+
+    cand = MagicMock()
+    cand.id = uuid.uuid4()
+    cand.linkedin_url = "https://www.linkedin.com/in/ACwAAstuck"
+    cand.raw_profile = {}
+    cand.is_complete_profile = False
+    cand.enrich_retry_count = pb.MAX_ENRICH_RETRY_ATTEMPTS
+    cand.first_name = "SIGNEY"
+    cand.last_name = "A."
+    cand.headline = None
+    cand.current_title = "Assistant Manager"
+    cand.current_company = None
+    cand.location = "Dubai"
+    cand.top_skills = None
+
+    db = MagicMock()
+    db.get.return_value = role
+    pair = (cand, MagicMock())
+
+    with patch.object(
+        pb, "list_incomplete_for_role", return_value=[pair]
+    ), patch.object(
+        pb, "list_retryable_incomplete_for_role", return_value=[]
+    ), patch.object(pb, "fetch_profiles") as fetch:
+        result = pb.retry_incomplete_profiles(db, role_id)
+
+    fetch.assert_not_called()
+    assert result["upgraded"] == 0
+    assert result["retryable"] == 0
+    assert result["exhausted"] == 1
+    assert "failed after" in result["summary"]
+    assert result["candidates"][0]["enrich_status"] == "enrich_failed"
+
+
+def test_retry_incomplete_increments_count_on_miss():
+    from app.services import pull_batch as pb
+
+    role_id = uuid.uuid4()
+    role = MagicMock()
+    role.id = role_id
+    role.slug = "hr_assistant"
+    role.retrieval = {
+        "currentJobTitles": ["HR Assistant"],
+        "location": "United Arab Emirates",
+        "pool_cap": 10,
+        "profileScraperMode": "Full",
+    }
+    role.last_page = 2
+    role.effective_actor_input = {
+        "dropped_keys": [],
+        "actor_input": {
+            "locations": ["United Arab Emirates"],
+            "currentJobTitles": ["HR Assistant"],
+        },
+    }
+
+    cand = MagicMock()
+    cand.id = uuid.uuid4()
+    cand.linkedin_url = "https://www.linkedin.com/in/ACwAAmiss"
+    cand.raw_profile = {
+        "id": "1",
+        "linkedinUrl": "https://www.linkedin.com/in/ACwAAmiss",
+    }
+    cand.is_complete_profile = False
+    cand.enrich_retry_count = 2
+    cand.first_name = "Riswana"
+    cand.last_name = "Sathar"
+    cand.headline = None
+    cand.current_title = "HR"
+    cand.current_company = None
+    cand.location = "Dubai"
+    cand.top_skills = None
+
+    db = MagicMock()
+    db.get.return_value = role
+    batch = MagicMock()
+    batch.id = uuid.uuid4()
+    pair = (cand, MagicMock())
+
+    with patch.object(
+        pb, "list_incomplete_for_role", return_value=[pair]
+    ), patch.object(
+        pb, "list_retryable_incomplete_for_role", return_value=[pair]
+    ), patch.object(
+        pb, "compile_retrieval", return_value={"locations": ["United Arab Emirates"]}
+    ), patch.object(
+        # Non-empty but unmatched — avoids persisted-filter rediscover path.
+        pb,
+        "fetch_profiles",
+        return_value=(
+            [
+                {
+                    "id": "other",
+                    "linkedinUrl": "https://www.linkedin.com/in/someone-else",
+                    "experience": [{"position": "HR"}],
+                }
+            ],
+            "SUCCEEDED",
+            "run-miss",
+        ),
+    ), patch.object(
+        pb, "_retry_full_enrich_for_missing", return_value=("SUCCEEDED", "run-miss")
+    ), patch.object(
+        pb, "_next_batch_number", return_value=1
+    ), patch.object(
+        pb, "_log_apify_call", return_value=batch
+    ):
+        result = pb.retry_incomplete_profiles(db, role_id)
+
+    assert cand.enrich_retry_count == 3
+    assert result["upgraded"] == 0
+    assert result["exhausted"] == 1
+    assert result["retryable"] == 0
+    assert result["candidates"][0]["enrich_status"] == "enrich_failed"
+
+
+def test_enrich_status_helpers():
+    from app.services.pull_batch import (
+        MAX_ENRICH_RETRY_ATTEMPTS,
+        enrich_status,
+        is_enrich_retry_exhausted,
+    )
+
+    complete = MagicMock(is_complete_profile=True, enrich_retry_count=0)
+    assert enrich_status(complete) == "complete"
+
+    thin = MagicMock(is_complete_profile=False, enrich_retry_count=1)
+    assert enrich_status(thin) == "needs_re_pull"
+    assert is_enrich_retry_exhausted(thin) is False
+
+    done = MagicMock(
+        is_complete_profile=False, enrich_retry_count=MAX_ENRICH_RETRY_ATTEMPTS
+    )
+    assert enrich_status(done) == "enrich_failed"
+    assert is_enrich_retry_exhausted(done) is True

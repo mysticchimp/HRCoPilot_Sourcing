@@ -161,7 +161,15 @@ def _incomplete_card(cand: Candidate, rc: RoleCandidate | None = None) -> dict[s
     row["total_score"] = None
     row["component_breakdown"] = None
     row["matched_signals"] = []
-    row["reasoning"] = INCOMPLETE_REASON
+    status = row.get("enrich_status") or "needs_re_pull"
+    if status == "enrich_failed":
+        max_n = row.get("max_enrich_retry_attempts") or 3
+        row["reasoning"] = (
+            f"insufficient data — failed after {max_n} enrich attempts "
+            "(manual re-pull)"
+        )
+    else:
+        row["reasoning"] = INCOMPLETE_REASON
     row["summary_text"] = None
     row["assessment_text"] = None
     row["narrative_generated_at"] = None

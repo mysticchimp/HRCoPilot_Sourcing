@@ -1284,6 +1284,15 @@ body {
   color: var(--ink-3);
 }
 
+.sourcing-table__badge--failed {
+  color: var(--ink-2);
+  border-color: var(--ink-3);
+}
+
+.sourcing-table__row--enrich-failed td {
+  color: var(--ink-3);
+}
+
 .sourcing-table__empty {
   color: var(--ink-3);
   text-align: center;

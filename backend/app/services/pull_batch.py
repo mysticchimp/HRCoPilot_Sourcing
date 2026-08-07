@@ -31,7 +31,28 @@ logger = logging.getLogger("sourcing.pull")
 FULL_ENRICH_RETRIES = 2
 FULL_ENRICH_RETRY_BACKOFF_SECS = 5
 
+# Cap retry-incomplete Full attempts per candidate. After this, skip auto-retry
+# (UI: "failed after N attempts") so stuck ACwAA stubs don't burn Apify forever.
+MAX_ENRICH_RETRY_ATTEMPTS = 3
+
 INCOMPLETE_REASON = "insufficient data — not scored (thin Short profile)"
+
+
+def _enrich_retry_count(cand: Candidate) -> int:
+    return int(getattr(cand, "enrich_retry_count", 0) or 0)
+
+
+def enrich_status(cand: Candidate) -> str:
+    """complete | needs_re_pull | enrich_failed (exhausted auto-retries)."""
+    if bool(getattr(cand, "is_complete_profile", True)):
+        return "complete"
+    if _enrich_retry_count(cand) >= MAX_ENRICH_RETRY_ATTEMPTS:
+        return "enrich_failed"
+    return "needs_re_pull"
+
+
+def is_enrich_retry_exhausted(cand: Candidate) -> bool:
+    return enrich_status(cand) == "enrich_failed"
 
 # Pagination / mode are run-specific; filter snapshot keeps search constraints only.
 _ACTOR_RUN_KEYS = frozenset(
@@ -513,6 +534,8 @@ def _upsert_candidate(
         if is_complete or not existing.is_complete_profile:
             existing.raw_profile = raw_apify_item
             existing.is_complete_profile = is_complete
+            if is_complete:
+                existing.enrich_retry_count = 0
         db.flush()
         return existing
 
@@ -528,6 +551,7 @@ def _upsert_candidate(
         top_skills=display.get("topSkills"),
         raw_profile=raw_apify_item,
         is_complete_profile=is_complete,
+        enrich_retry_count=0,
         first_seen_at=datetime.now(timezone.utc),
     )
     db.add(cand)
@@ -536,6 +560,7 @@ def _upsert_candidate(
 
 
 def _candidate_row(c: Candidate) -> dict:
+    status = enrich_status(c)
     return {
         "id": str(c.id),
         "linkedin_url": c.linkedin_url,
@@ -547,6 +572,10 @@ def _candidate_row(c: Candidate) -> dict:
         "location": c.location,
         "top_skills": c.top_skills,
         "is_complete_profile": bool(c.is_complete_profile),
+        "enrich_retry_count": _enrich_retry_count(c),
+        "enrich_status": status,
+        "enrich_retry_exhausted": status == "enrich_failed",
+        "max_enrich_retry_attempts": MAX_ENRICH_RETRY_ATTEMPTS,
     }
 
 
@@ -981,19 +1010,54 @@ def list_incomplete_for_role(
     )
 
 
+def list_retryable_incomplete_for_role(
+    db: Session, role_id: uuid.UUID
+) -> list[tuple[Candidate, RoleCandidate]]:
+    """Incomplete stubs still under the auto-retry cap."""
+    return list(
+        db.execute(
+            select(Candidate, RoleCandidate)
+            .join(RoleCandidate, RoleCandidate.candidate_id == Candidate.id)
+            .where(
+                RoleCandidate.role_id == role_id,
+                Candidate.is_complete_profile.is_(False),
+                Candidate.enrich_retry_count < MAX_ENRICH_RETRY_ATTEMPTS,
+            )
+        ).all()
+    )
+
+
 def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]:
-    """Re-attempt Full enrich for existing incomplete candidates on this role."""
+    """Re-attempt Full enrich for incomplete candidates under the retry cap."""
     role = db.get(Role, role_id)
     if not role:
         raise ValueError(f"role {role_id} not found")
 
-    pairs = list_incomplete_for_role(db, role_id)
+    all_incomplete = list_incomplete_for_role(db, role_id)
+    pairs = list_retryable_incomplete_for_role(db, role_id)
+    exhausted_n = len(all_incomplete) - len(pairs)
     if not pairs:
+        if exhausted_n:
+            return {
+                "upgraded": 0,
+                "still_incomplete": exhausted_n,
+                "exhausted": exhausted_n,
+                "retryable": 0,
+                "summary": (
+                    f"No retryable profiles — {exhausted_n} failed after "
+                    f"{MAX_ENRICH_RETRY_ATTEMPTS} attempts (manual re-pull)."
+                ),
+                "candidates": [_candidate_row(c) for c, _ in all_incomplete],
+                "max_enrich_retry_attempts": MAX_ENRICH_RETRY_ATTEMPTS,
+            }
         return {
             "upgraded": 0,
             "still_incomplete": 0,
+            "exhausted": 0,
+            "retryable": 0,
             "summary": "No incomplete profiles to retry.",
             "candidates": [],
+            "max_enrich_retry_attempts": MAX_ENRICH_RETRY_ATTEMPTS,
         }
 
     incomplete = [cand for cand, _rc in pairs]
@@ -1145,19 +1209,22 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
 
     upgraded: list[Candidate] = []
     still: list[Candidate] = []
+    newly_exhausted = 0
     for i, cand in enumerate(incomplete):
         url = _normalize_url(cand.linkedin_url)
-        if not url:
-            still.append(cand)
-            continue
-        profile = _resolve_full_profile(
-            url,
-            by_url=by_url,
-            by_id=by_id,
-            short_by_url=short_by_url,
-            by_stem=by_stem,
-        )
+        profile = None
+        if url:
+            profile = _resolve_full_profile(
+                url,
+                by_url=by_url,
+                by_id=by_id,
+                short_by_url=short_by_url,
+                by_stem=by_stem,
+            )
         if not profile:
+            cand.enrich_retry_count = _enrich_retry_count(cand) + 1
+            if is_enrich_retry_exhausted(cand):
+                newly_exhausted += 1
             still.append(cand)
             continue
         display = compact(profile, i)
@@ -1169,28 +1236,44 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
     role.updated_at = datetime.now(timezone.utc)
     db.commit()
 
+    exhausted_total = exhausted_n + newly_exhausted
     summary = (
         f"Retry incomplete: upgraded {len(upgraded)}, "
-        f"still incomplete {len(still)}."
+        f"still incomplete {len(still) + exhausted_n}"
     )
+    if newly_exhausted:
+        summary += (
+            f" ({newly_exhausted} hit {MAX_ENRICH_RETRY_ATTEMPTS}-attempt cap)"
+        )
+    summary += "."
     if dropped_keys:
         summary += f" (relaxed filters: dropped {', '.join(dropped_keys)})"
     logger.info(
         "retry_incomplete done role_id=%s batch_id=%s upgraded=%s still=%s "
-        "dropped_keys=%s",
+        "newly_exhausted=%s dropped_keys=%s",
         role_id,
         batch.id,
         len(upgraded),
         len(still),
+        newly_exhausted,
         dropped_keys,
     )
+    # Include already-exhausted stubs in the response so the UI can label them.
+    exhausted_rows = [
+        c for c, _ in all_incomplete if is_enrich_retry_exhausted(c) and c not in still
+    ]
     return {
         "upgraded": len(upgraded),
-        "still_incomplete": len(still),
+        "still_incomplete": len(still) + exhausted_n,
+        "exhausted": exhausted_total,
+        "retryable": sum(1 for c in still if not is_enrich_retry_exhausted(c)),
         "summary": summary,
         "batch_id": str(batch.id),
         "apify_run_id": run_id,
         "status": status,
         "dropped_keys": dropped_keys,
-        "candidates": [_candidate_row(c) for c in upgraded + still],
+        "max_enrich_retry_attempts": MAX_ENRICH_RETRY_ATTEMPTS,
+        "candidates": [
+            _candidate_row(c) for c in upgraded + still + exhausted_rows
+        ],
     }

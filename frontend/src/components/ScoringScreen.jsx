@@ -587,11 +587,17 @@ export default function ScoringScreen() {
               <ul className="scoring__incomplete-list">
                 {incompleteCandidates.map((c) => {
                   const name = candidateName(c);
+                  const enrichFailed =
+                    c.enrich_status === 'enrich_failed' ||
+                    c.enrich_retry_exhausted;
+                  const maxN = c.max_enrich_retry_attempts || 3;
                   return (
                     <li key={c.id || c.candidate_id || c.linkedin_url}>
                       <span>{name}</span>
                       <span className="scoring__incomplete-status mono">
-                        insufficient data — not scored
+                        {enrichFailed
+                          ? `failed after ${maxN} attempts — manual re-pull`
+                          : 'insufficient data — not scored'}
                       </span>
                     </li>
                   );
