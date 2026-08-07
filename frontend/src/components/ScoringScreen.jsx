@@ -212,6 +212,7 @@ export default function ScoringScreen() {
   const [scoringMode, setScoringMode] = useState(null);
   const [loading, setLoading] = useState(false);
   const [scoring, setScoring] = useState(false);
+  const [scoringWaitLong, setScoringWaitLong] = useState(false);
   const [narrating, setNarrating] = useState(false);
   const [narrativeSummary, setNarrativeSummary] = useState(null);
   const [savingJd, setSavingJd] = useState(false);
@@ -299,6 +300,19 @@ export default function ScoringScreen() {
   useEffect(() => {
     loadScores(activeSlug);
   }, [activeSlug, loadScores]);
+
+  useEffect(() => {
+    if (!scoring) {
+      setScoringWaitLong(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setScoringWaitLong(true), 60_000);
+    return () => clearTimeout(timer);
+  }, [scoring]);
+
+  const scoringStatusText = scoringWaitLong
+    ? 'Still scoring — large batches can take a few minutes'
+    : 'Scoring candidates — this can take a minute';
 
   const handleSaveJd = async (e) => {
     e.preventDefault();
@@ -526,16 +540,16 @@ export default function ScoringScreen() {
             {scoring ? 'Scoring…' : 'Score candidates'}
           </button>
           {scoring && (
-            <p className="scoring__status mono">
-              Scoring candidates — this can take a minute
+            <p className="scoring__status mono" role="status">
+              {scoringStatusText}
             </p>
           )}
         </section>
       )}
 
       {activeSlug && !loading && scoring && hasScores && (
-        <p className="scoring__status mono">
-          Scoring candidates — this can take a minute
+        <p className="scoring__status mono" role="status">
+          {scoringStatusText}
         </p>
       )}
 

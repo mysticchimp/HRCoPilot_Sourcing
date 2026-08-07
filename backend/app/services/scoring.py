@@ -23,10 +23,10 @@ from app.services.pull_batch import (
 
 logger = logging.getLogger("sourcing.scoring")
 
-SCORE_TIMEOUT_SECONDS = 180
 SCORE_SLOW_MESSAGE = (
-    "Scoring is taking longer than expected — the scoring service may be "
-    "cold-starting. Please try again in a minute."
+    "Scoring is taking longer than expected — large batches can take several "
+    "minutes, and the scoring service may still be working. Please wait a "
+    "moment and try again if results do not appear."
 )
 SCORE_UNREACHABLE_MESSAGE = (
     "Could not reach the scoring service — please try again shortly."
@@ -244,14 +244,19 @@ def _call_scoring_api(
     else:
         body["jd_text"] = jd_text or ""
 
+    timeout = settings.score_timeout_seconds
     try:
         resp = requests.post(
             url,
             json=body,
-            timeout=SCORE_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except requests.Timeout as e:
-        logger.warning("scoring API timeout url=%s", url)
+        logger.warning(
+            "scoring API timeout url=%s timeout_s=%s",
+            url,
+            timeout,
+        )
         raise ScoringTransientError(SCORE_SLOW_MESSAGE) from e
     except requests.RequestException as e:
         logger.warning("scoring API unreachable url=%s err=%s", url, e)

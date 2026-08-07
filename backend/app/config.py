@@ -46,6 +46,11 @@ class Settings:
             "SCORING_API_URL",
             "https://contra6-scoring-api.onrender.com",
         ).rstrip("/")
+        # Client wait for contra6-scoring-api /score. Keep above worst observed
+        # wall-clock for large batches (n≈17 ~186s; n≈25 can approach ~270s+).
+        self.score_timeout_seconds = int(
+            os.environ.get("SCORE_TIMEOUT_SECONDS", "400")
+        )
 
 
 @lru_cache

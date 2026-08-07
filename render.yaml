@@ -23,6 +23,8 @@ services:
         value: "true"
       - key: SCORING_API_URL
         value: "https://contra6-scoring-api.onrender.com"
+      - key: SCORE_TIMEOUT_SECONDS
+        value: "400"
       - key: PYTHON_VERSION
         value: "3.12.0"
 
