@@ -171,10 +171,10 @@ function polarToCartesian(cx, cy, radius, angleRad) {
 }
 
 function RadarChart({ axes }) {
-  const size = 220;
+  const size = 520;
   const cx = size / 2;
   const cy = size / 2;
-  const radius = 68;
+  const radius = 175;
   const n = axes.length;
   if (n < 3) return null;
 
@@ -225,11 +225,11 @@ function RadarChart({ axes }) {
           className="review-radar__dot"
           cx={p.x}
           cy={p.y}
-          r={2.5}
+          r={4}
         />
       ))}
       {axes.map((axis, i) => {
-        const labelR = radius + 22;
+        const labelR = radius + 42;
         const p = polarToCartesian(cx, cy, labelR, angleAt(i));
         return (
           <text
@@ -302,7 +302,7 @@ function CareerTimeline({ timeline }) {
 
   return (
     <section className="review-card__section" aria-label="Career timeline">
-      <h3 className="review-card__section-title mono">Career timeline</h3>
+      <h3 className="review-card__section-title">Career timeline</h3>
       <div className="review-timeline">
         <div className="review-timeline__track" aria-hidden="true">
           <div className="review-timeline__line" />
@@ -316,7 +316,7 @@ function CareerTimeline({ timeline }) {
               }}
               title={g.label}
             >
-              <span className="review-timeline__gap-label mono">{g.label}</span>
+              <span className="review-timeline__gap-label">{g.label}</span>
             </div>
           ))}
           {timeline.markers.map((m) => (
@@ -328,7 +328,7 @@ function CareerTimeline({ timeline }) {
             />
           ))}
         </div>
-        <div className="review-timeline__ends mono">
+        <div className="review-timeline__ends">
           <span>{timeline.start_year}</span>
           <span>{timeline.end_label}</span>
         </div>
@@ -347,6 +347,8 @@ function ReviewCard({ card, rank, actions, busy, onAction }) {
   );
   const career = card.career || {};
   const reasoning = (card.reasoning || '').trim();
+  const headline = (card.headline || '').trim();
+  const summary = [headline, reasoning].filter(Boolean).join(' — ');
   const yearsLabel = formatYearsExp(career.years_experience);
   const metaBits = [titleAtCompany(card), card.location, yearsLabel].filter(
     (x) => x && x !== '—',
@@ -361,9 +363,9 @@ function ReviewCard({ card, rank, actions, busy, onAction }) {
       <header className="review-card__header">
         <div className="review-card__header-main">
           <div className="review-card__badges">
-            <span className="review-card__badge mono">Rank #{rank}</span>
+            <span className="review-card__badge">Rank #{rank}</span>
             <span
-              className="review-card__badge review-card__badge--fit mono"
+              className="review-card__badge review-card__badge--fit"
               title={`raw total_score: ${card.total_score}`}
             >
               {formatScore(card.total_score)} Match
@@ -407,84 +409,88 @@ function ReviewCard({ card, rank, actions, busy, onAction }) {
       </header>
 
       {reasoning && (
-        <section className="review-card__section" aria-label="Summary">
-          <h3 className="review-card__section-title mono">Summary</h3>
-          <p className="review-card__summary">{reasoning}</p>
-        </section>
-      )}
-
-      {axes.length >= 3 && (
-        <section className="review-card__section" aria-label="Role-fit breakdown">
-          <h3 className="review-card__section-title mono">Role-fit breakdown</h3>
-          <div className="review-card__radar-wrap">
-            <RadarChart axes={axes} />
-          </div>
-        </section>
-      )}
-
-      <CareerTimeline timeline={career.timeline} />
-
-      {hasCareerStats && career.position_count > 0 && (
-        <div className="review-card__stats" aria-label="Career stats">
-          <div className="review-stat">
-            <span className="review-stat__icon">
-              <JobsIcon />
-            </span>
-            <div>
-              <div className="review-stat__value mono">{career.job_changes ?? 0}</div>
-              <div className="review-stat__label mono">Job Changes</div>
-            </div>
-          </div>
-          <div className="review-stat">
-            <span className="review-stat__icon">
-              <GapIcon />
-            </span>
-            <div>
-              <div className="review-stat__value mono">
-                {formatGapLabel(career.longest_gap_months)}
-              </div>
-              <div className="review-stat__label mono">Career Gap</div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {(signals.length > 0 || skills.length > 0) && (
-        <div className="review-card__tags-row">
-          {signals.length > 0 && (
-            <section className="review-card__section review-card__section--flush" aria-label="Strengths">
-              <h3 className="review-card__section-title mono">Strengths</h3>
-              <ul className="review-card__signals">
-                {signals.map((s) => (
-                  <li key={s} className="review-card__signal">
-                    {s}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-
-          {skills.length > 0 && (
-            <section className="review-card__section review-card__section--flush" aria-label="Top skills">
-              <h3 className="review-card__section-title mono">Top skills</h3>
-              <ul className="review-card__signals">
-                {skills.map((s) => (
-                  <li key={s} className="review-card__signal review-card__signal--skill">
-                    {s}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-        </div>
-      )}
-
-      {reasoning && (
         <section className="review-card__section" aria-label="Assessment">
-          <h3 className="review-card__section-title mono">Assessment</h3>
+          <h3 className="review-card__section-title">Assessment</h3>
           <p className="review-card__reasoning-body">{reasoning}</p>
         </section>
       )}
+
+      <div className="review-card__body">
+        {axes.length >= 3 && (
+          <section className="review-card__radar-col" aria-label="Role-fit breakdown">
+            <h3 className="review-card__section-title">Role-fit breakdown</h3>
+            <div className="review-card__radar-wrap">
+              <RadarChart axes={axes} />
+            </div>
+          </section>
+        )}
+
+        <div className="review-card__details">
+          {summary && (
+            <section className="review-card__section review-card__section--flush" aria-label="Summary">
+              <h3 className="review-card__section-title">Summary</h3>
+              <p className="review-card__summary">{summary}</p>
+            </section>
+          )}
+
+          <CareerTimeline timeline={career.timeline} />
+
+          {hasCareerStats && career.position_count > 0 && (
+            <div className="review-card__stats" aria-label="Career stats">
+              <div className="review-stat">
+                <span className="review-stat__icon">
+                  <JobsIcon />
+                </span>
+                <div>
+                  <div className="review-stat__value">{career.job_changes ?? 0}</div>
+                  <div className="review-stat__label">Job Changes</div>
+                </div>
+              </div>
+              <div className="review-stat">
+                <span className="review-stat__icon">
+                  <GapIcon />
+                </span>
+                <div>
+                  <div className="review-stat__value">
+                    {formatGapLabel(career.longest_gap_months)}
+                  </div>
+                  <div className="review-stat__label">Career Gap</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {(signals.length > 0 || skills.length > 0) && (
+            <div className="review-card__tags-row">
+              {signals.length > 0 && (
+                <section className="review-card__section review-card__section--flush" aria-label="Strengths">
+                  <h3 className="review-card__section-title">Strengths</h3>
+                  <ul className="review-card__signals">
+                    {signals.map((s) => (
+                      <li key={s} className="review-card__signal">
+                        {s}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+
+              {skills.length > 0 && (
+                <section className="review-card__section review-card__section--flush" aria-label="Top skills">
+                  <h3 className="review-card__section-title">Top skills</h3>
+                  <ul className="review-card__signals">
+                    {skills.map((s) => (
+                      <li key={s} className="review-card__signal review-card__signal--skill">
+                        {s}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </article>
   );
 }
