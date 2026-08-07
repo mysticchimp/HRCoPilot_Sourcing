@@ -25,7 +25,7 @@ export default function ChooserPage() {
   };
 
   const openAts = () => {
-    window.open(ATS_URL, '_blank', 'noopener,noreferrer');
+    window.location.assign(ATS_URL);
   };
 
   return (
