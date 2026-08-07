@@ -125,6 +125,10 @@ export function scoreRole(slug) {
   return request(`/roles/${encodeURIComponent(slug)}/score`, { method: 'POST' });
 }
 
+export function narrateRole(slug) {
+  return request(`/roles/${encodeURIComponent(slug)}/narrate`, { method: 'POST' });
+}
+
 export function fetchRoleScores(slug) {
   return request(`/roles/${encodeURIComponent(slug)}/scores`);
 }

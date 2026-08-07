@@ -1,4 +1,4 @@
-"""SQLAlchemy models matching migrations/001_init.sql (+ 002–007)."""
+"""SQLAlchemy models matching migrations/001_init.sql (+ 002–008)."""
 
 from __future__ import annotations
 
@@ -92,6 +92,13 @@ class RoleCandidate(Base):
     scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     # "parsed" | "llm" — which /score mode produced this score (audit trail).
     scoring_mode: Mapped[Optional[str]] = mapped_column(Text)
+    # LLM narratives (summary + assessment), cached by narrative_jd_hash.
+    summary_text: Mapped[Optional[str]] = mapped_column(Text)
+    assessment_text: Mapped[Optional[str]] = mapped_column(Text)
+    narrative_generated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True)
+    )
+    narrative_jd_hash: Mapped[Optional[str]] = mapped_column(Text)
     # reviewing | shortlisted | benched — default reviewing so newly scored
     # candidates land in the Review queue automatically.
     review_status: Mapped[str] = mapped_column(

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import RolePicker from './RolePicker';
 import { useRole } from '../lib/roleContext';
-import { fetchRoleScores, saveRoleJd, scoreRole } from '../lib/sourcingApi';
+import {
+  fetchRoleScores,
+  narrateRole,
+  saveRoleJd,
+  scoreRole,
+} from '../lib/sourcingApi';
 
 function ExternalLinkIcon() {
   return (
@@ -207,6 +212,8 @@ export default function ScoringScreen() {
   const [scoringMode, setScoringMode] = useState(null);
   const [loading, setLoading] = useState(false);
   const [scoring, setScoring] = useState(false);
+  const [narrating, setNarrating] = useState(false);
+  const [narrativeSummary, setNarrativeSummary] = useState(null);
   const [savingJd, setSavingJd] = useState(false);
   const [error, setError] = useState(null);
   const [jdModalOpen, setJdModalOpen] = useState(false);
@@ -250,6 +257,7 @@ export default function ScoringScreen() {
         setSkippedIncomplete(0);
         setScoreSummary(null);
         setScoringMode(null);
+        setNarrativeSummary(null);
         setJdText('');
         setHasJd(false);
         setHasParsedJd(false);
@@ -273,6 +281,7 @@ export default function ScoringScreen() {
         setSkippedIncomplete(data.skipped_incomplete || 0);
         setScoreSummary(null);
         setScoringMode(data.scoring_mode || null);
+        setNarrativeSummary(null);
         applyJdMeta(data, '');
       } catch (err) {
         setError(err.message);
@@ -331,6 +340,7 @@ export default function ScoringScreen() {
     if (!activeSlug || scoring) return;
     setScoring(true);
     setError(null);
+    setNarrativeSummary(null);
     try {
       const data = await scoreRole(activeSlug);
       setCandidates(data.candidates || []);
@@ -348,12 +358,33 @@ export default function ScoringScreen() {
     }
   };
 
+  const handleNarrate = async () => {
+    if (!activeSlug || narrating || scoring) return;
+    setNarrating(true);
+    setError(null);
+    setNarrativeSummary(null);
+    try {
+      const data = await narrateRole(activeSlug);
+      setNarrativeSummary(data.summary || null);
+      const refreshed = await fetchRoleScores(activeSlug);
+      setCandidates(refreshed.candidates || []);
+      setIncompleteCandidates(refreshed.incomplete_candidates || []);
+      setSkippedIncomplete(refreshed.skipped_incomplete || 0);
+      setScoringMode(refreshed.scoring_mode || null);
+      applyJdMeta(refreshed, jdText);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setNarrating(false);
+    }
+  };
+
   const hasScores = candidates.length > 0;
   const showResults =
     hasScores || (Boolean(scoreSummary) && skippedIncomplete > 0);
   const showJdStep = Boolean(activeSlug) && !hasScores && !hasJd && !scoreSummary;
   const showScoreCta = Boolean(activeSlug) && !hasScores && hasJd && !scoreSummary;
-  const busy = loading || scoring || savingJd;
+  const busy = loading || scoring || narrating || savingJd;
   const jdModeLabel = hasParsedJd ? 'Brief (JSON)' : 'Text (AI-parsed)';
 
   return (
@@ -366,9 +397,20 @@ export default function ScoringScreen() {
             type="button"
             className="btn btn--ghost"
             onClick={handleScore}
-            disabled={scoring}
+            disabled={scoring || narrating}
           >
             {scoring ? 'Re-scoring…' : 'Re-score'}
+          </button>
+        )}
+        {showResults && activeSlug && hasScores && (
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={handleNarrate}
+            disabled={scoring || narrating}
+            title="Generate LLM summary + assessment (cached by JD hash)"
+          >
+            {narrating ? 'Generating narratives…' : 'Generate Narratives'}
           </button>
         )}
         {activeRole && hasJd && (
@@ -402,6 +444,12 @@ export default function ScoringScreen() {
       {error && (
         <p className="scoring__error" role="alert">
           {error}
+        </p>
+      )}
+
+      {narrativeSummary && showResults && (
+        <p className="scoring__status mono" role="status">
+          {narrativeSummary}
         </p>
       )}
 

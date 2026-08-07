@@ -142,6 +142,12 @@ def _scored_card(cand: Candidate, rc: RoleCandidate) -> dict[str, Any]:
     row["component_breakdown"] = rc.component_breakdown
     row["matched_signals"] = list(rc.matched_signals or [])
     row["reasoning"] = rc.reasoning
+    row["summary_text"] = rc.summary_text
+    row["assessment_text"] = rc.assessment_text
+    row["narrative_generated_at"] = (
+        rc.narrative_generated_at.isoformat() if rc.narrative_generated_at else None
+    )
+    row["narrative_jd_hash"] = rc.narrative_jd_hash
     row["scored_at"] = rc.scored_at.isoformat() if rc.scored_at else None
     row["scoring_mode"] = getattr(rc, "scoring_mode", None)
     row["score_status"] = "scored"
@@ -156,6 +162,10 @@ def _incomplete_card(cand: Candidate, rc: RoleCandidate | None = None) -> dict[s
     row["component_breakdown"] = None
     row["matched_signals"] = []
     row["reasoning"] = INCOMPLETE_REASON
+    row["summary_text"] = None
+    row["assessment_text"] = None
+    row["narrative_generated_at"] = None
+    row["narrative_jd_hash"] = None
     row["scored_at"] = rc.scored_at.isoformat() if rc and rc.scored_at else None
     row["scoring_mode"] = None
     row["score_status"] = "insufficient_data"

@@ -199,6 +199,7 @@ function RadarChart({ axes }) {
     <svg
       className="review-radar"
       viewBox={`0 0 ${size} ${size}`}
+      preserveAspectRatio="xMidYMid meet"
       role="img"
       aria-label="Role-fit component breakdown"
     >
@@ -337,18 +338,26 @@ function CareerTimeline({ timeline }) {
   );
 }
 
-function ReviewCard({ card, rank, actions, busy, onAction }) {
+function ReviewCard({ card, rank }) {
   const name = candidateName(card);
-  const signals = Array.isArray(card.matched_signals) ? card.matched_signals : [];
-  const skills = useMemo(() => parseSkills(card), [card]);
+  const matchedSignals = (
+    Array.isArray(card.matched_signals) ? card.matched_signals : []
+  )
+    .map((s) => (typeof s === 'string' ? s.trim() : ''))
+    .filter(Boolean)
+    .slice(0, 8);
+  const skills = useMemo(() => parseSkills(card).slice(0, 8), [card]);
   const axes = useMemo(
     () => normalizeBreakdown(card.component_breakdown),
     [card.component_breakdown],
   );
   const career = card.career || {};
   const reasoning = (card.reasoning || '').trim();
-  const headline = (card.headline || '').trim();
-  const summary = [headline, reasoning].filter(Boolean).join(' — ');
+  const assessmentText = (card.assessment_text || '').trim() || reasoning;
+  const summaryText =
+    (card.summary_text || '').trim() ||
+    (career.about || '').trim() ||
+    '';
   const yearsLabel = formatYearsExp(career.years_experience);
   const metaBits = [titleAtCompany(card), card.location, yearsLabel].filter(
     (x) => x && x !== '—',
@@ -391,31 +400,16 @@ function ReviewCard({ card, rank, actions, busy, onAction }) {
             )}
           </p>
         </div>
-        <div className="review-card__header-actions">
-          {actions.map((a) => (
-            <button
-              key={a.status}
-              type="button"
-              className={`btn review__action review__action--${a.variant}`}
-              onClick={() => onAction(a.status)}
-              disabled={busy}
-            >
-              {a.icon === 'bench' && <BenchIcon />}
-              {a.icon === 'shortlist' && <ShortlistIcon />}
-              {a.label}
-            </button>
-          ))}
-        </div>
       </header>
 
-      {reasoning && (
+      {assessmentText && (
         <section className="review-card__section" aria-label="Assessment">
           <h3 className="review-card__section-title">Assessment</h3>
-          <p className="review-card__reasoning-body">{reasoning}</p>
+          <p className="review-card__reasoning-body">{assessmentText}</p>
         </section>
       )}
 
-      <div className="review-card__body">
+      <div className={`review-card__body${axes.length >= 3 ? '' : ' review-card__body--solo'}`}>
         {axes.length >= 3 && (
           <section className="review-card__radar-col" aria-label="Role-fit breakdown">
             <h3 className="review-card__section-title">Role-fit breakdown</h3>
@@ -426,10 +420,10 @@ function ReviewCard({ card, rank, actions, busy, onAction }) {
         )}
 
         <div className="review-card__details">
-          {summary && (
+          {summaryText && (
             <section className="review-card__section review-card__section--flush" aria-label="Summary">
               <h3 className="review-card__section-title">Summary</h3>
-              <p className="review-card__summary">{summary}</p>
+              <p className="review-card__summary">{summaryText}</p>
             </section>
           )}
 
@@ -460,14 +454,17 @@ function ReviewCard({ card, rank, actions, busy, onAction }) {
             </div>
           )}
 
-          {(signals.length > 0 || skills.length > 0) && (
+          {(matchedSignals.length > 0 || skills.length > 0) && (
             <div className="review-card__tags-row">
-              {signals.length > 0 && (
-                <section className="review-card__section review-card__section--flush" aria-label="Strengths">
-                  <h3 className="review-card__section-title">Strengths</h3>
+              {matchedSignals.length > 0 && (
+                <section
+                  className="review-card__section review-card__section--flush"
+                  aria-label="Matched attributes"
+                >
+                  <h3 className="review-card__section-title">Matched attributes</h3>
                   <ul className="review-card__signals">
-                    {signals.map((s) => (
-                      <li key={s} className="review-card__signal">
+                    {matchedSignals.map((s) => (
+                      <li key={s} className="review-card__signal review-card__signal--match">
                         {s}
                       </li>
                     ))}
@@ -685,19 +682,19 @@ export default function ReviewScreen() {
               <div className="review__progress">
                 <button
                   type="button"
-                  className="btn btn--ghost review__nav-btn"
+                  className="review__nav-btn"
                   onClick={goPrev}
                   disabled={index <= 0 || busy}
                   aria-label="Previous candidate"
                 >
                   ←
                 </button>
-                <span className="mono review__progress-label">
+                <span className="review__progress-label">
                   {index + 1} of {total}
                 </span>
                 <button
                   type="button"
-                  className="btn btn--ghost review__nav-btn"
+                  className="review__nav-btn"
                   onClick={goNext}
                   disabled={index >= total - 1 || busy}
                   aria-label="Next candidate"
@@ -706,15 +703,27 @@ export default function ReviewScreen() {
                 </button>
               </div>
 
-              <ReviewCard
-                card={card}
-                rank={rank}
-                actions={actions}
-                busy={busy}
-                onAction={applyStatus}
-              />
+              <div className="review__deck">
+                <ReviewCard card={card} rank={rank} />
+              </div>
 
-              <p className="review__hints mono">
+              <div className="review__actions">
+                {actions.map((a) => (
+                  <button
+                    key={a.status}
+                    type="button"
+                    className={`review__action review__action--${a.variant}`}
+                    onClick={() => applyStatus(a.status)}
+                    disabled={busy}
+                  >
+                    {a.icon === 'bench' && <BenchIcon />}
+                    {a.icon === 'shortlist' && <ShortlistIcon />}
+                    {a.label}
+                  </button>
+                ))}
+              </div>
+
+              <p className="review__hints">
                 ← → navigate · S shortlist · B bench
               </p>
             </div>

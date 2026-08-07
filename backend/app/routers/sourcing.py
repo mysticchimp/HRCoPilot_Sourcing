@@ -14,6 +14,7 @@ from app.auth import get_current_user
 from app.db import get_db
 from app.models import Role
 from app.services import chat as chat_service
+from app.services import narrative as narrative_service
 from app.services import review as review_service
 from app.services import scoring as scoring_service
 from app.services.pull_batch import list_role_candidates, pull_batch, retry_incomplete_profiles
@@ -215,6 +216,30 @@ def get_scores(slug: str, db: Session = Depends(get_db)):
         "count": result["count"],
         "skipped_incomplete": result["skipped_incomplete"],
         "incomplete_candidates": result["incomplete_candidates"],
+    }
+
+
+@protected.post("/roles/{slug}/narrate")
+def narrate_role(slug: str, db: Session = Depends(get_db)):
+    role = _get_role_by_slug(db, slug)
+    try:
+        result = narrative_service.narrate_role(db, role)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ScoringTransientError as e:
+        raise HTTPException(status_code=503, detail=e.message) from None
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong on our side — please try again.",
+        ) from None
+    return {
+        "role": role.slug,
+        "generated": result.get("generated") or 0,
+        "skipped_already_current": result.get("skipped_already_current") or 0,
+        "failed": result.get("failed") or 0,
+        "jd_hash": result.get("jd_hash"),
+        "summary": result.get("summary"),
     }
 
 
