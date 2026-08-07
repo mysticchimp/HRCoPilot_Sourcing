@@ -345,7 +345,7 @@ function ReviewCard({ card, rank }) {
   )
     .map((s) => (typeof s === 'string' ? s.trim() : ''))
     .filter(Boolean)
-    .slice(0, 8);
+    .slice(0, 6);
   const skills = useMemo(() => parseSkills(card).slice(0, 8), [card]);
   const axes = useMemo(
     () => normalizeBreakdown(card.component_breakdown),
@@ -421,7 +421,10 @@ function ReviewCard({ card, rank }) {
 
         <div className="review-card__details">
           {summaryText && (
-            <section className="review-card__section review-card__section--flush" aria-label="Summary">
+            <section
+              className="review-card__section review-card__section--flush review-card__section--compressible"
+              aria-label="Summary"
+            >
               <h3 className="review-card__section-title">Summary</h3>
               <p className="review-card__summary">{summaryText}</p>
             </section>
@@ -464,7 +467,11 @@ function ReviewCard({ card, rank }) {
                   <h3 className="review-card__section-title">Matched attributes</h3>
                   <ul className="review-card__signals">
                     {matchedSignals.map((s) => (
-                      <li key={s} className="review-card__signal review-card__signal--match">
+                      <li
+                        key={s}
+                        className="review-card__signal review-card__signal--match"
+                        title={s}
+                      >
                         {s}
                       </li>
                     ))}
@@ -477,7 +484,11 @@ function ReviewCard({ card, rank }) {
                   <h3 className="review-card__section-title">Top skills</h3>
                   <ul className="review-card__signals">
                     {skills.map((s) => (
-                      <li key={s} className="review-card__signal review-card__signal--skill">
+                      <li
+                        key={s}
+                        className="review-card__signal review-card__signal--skill"
+                        title={s}
+                      >
                         {s}
                       </li>
                     ))}
