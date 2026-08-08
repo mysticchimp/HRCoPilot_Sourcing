@@ -186,6 +186,7 @@ def score_role(slug: str, db: Session = Depends(get_db)):
             status_code=500,
             detail="Something went wrong on our side — please try again.",
         ) from None
+    ranked = result.get("ranked") or result.get("candidates") or []
     return {
         "role": role.slug,
         "jd_text": role.jd_text,
@@ -193,8 +194,12 @@ def score_role(slug: str, db: Session = Depends(get_db)):
         "has_parsed_jd": bool(role.jd_parsed),
         "jd_mode": "parsed" if role.jd_parsed else "text",
         "scoring_mode": result.get("scoring_mode"),
-        "candidates": result.get("candidates") or [],
-        "count": result.get("count") or 0,
+        "ranked": ranked,
+        "not_yet_scored": result.get("not_yet_scored") or [],
+        "not_yet_scored_count": result.get("not_yet_scored_count")
+        or len(result.get("not_yet_scored") or []),
+        "candidates": ranked,
+        "count": result.get("count") or len(ranked),
         "skipped_incomplete": result.get("skipped_incomplete") or 0,
         "incomplete_candidates": result.get("incomplete_candidates") or [],
         "summary": result.get("summary"),
@@ -205,6 +210,7 @@ def score_role(slug: str, db: Session = Depends(get_db)):
 def get_scores(slug: str, db: Session = Depends(get_db)):
     role = _get_role_by_slug(db, slug)
     result = scoring_service.list_score_payload(db, role.id)
+    ranked = result.get("ranked") or result.get("candidates") or []
     return {
         "role": role.slug,
         "jd_text": role.jd_text,
@@ -212,7 +218,11 @@ def get_scores(slug: str, db: Session = Depends(get_db)):
         "has_parsed_jd": bool(role.jd_parsed),
         "jd_mode": "parsed" if role.jd_parsed else "text",
         "scoring_mode": result.get("scoring_mode"),
-        "candidates": result["candidates"],
+        "ranked": ranked,
+        "not_yet_scored": result.get("not_yet_scored") or [],
+        "not_yet_scored_count": result.get("not_yet_scored_count")
+        or len(result.get("not_yet_scored") or []),
+        "candidates": ranked,
         "count": result["count"],
         "skipped_incomplete": result["skipped_incomplete"],
         "incomplete_candidates": result["incomplete_candidates"],

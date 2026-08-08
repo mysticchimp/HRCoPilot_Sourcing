@@ -39,6 +39,10 @@ function titleAtCompany(c) {
   return [title, company].filter(Boolean).join(' @ ') || '—';
 }
 
+function candidateKey(c) {
+  return c.id || c.candidate_id || c.linkedin_url;
+}
+
 /** Pretty-print JSON for display when the role stores a scoring brief. */
 function formatJdForDisplay(text, hasParsedJd) {
   if (!hasParsedJd || !text) return text || '';
@@ -47,6 +51,24 @@ function formatJdForDisplay(text, hasParsedJd) {
   } catch {
     return text;
   }
+}
+
+function applyScoreBuckets(data, setters) {
+  const {
+    setCandidates,
+    setNotYetScored,
+    setIncompleteCandidates,
+    setSkippedIncomplete,
+  } = setters;
+  const ranked = data.ranked || data.candidates || [];
+  setCandidates(ranked);
+  setNotYetScored(data.not_yet_scored || []);
+  setIncompleteCandidates(data.incomplete_candidates || []);
+  setSkippedIncomplete(
+    data.skipped_incomplete != null
+      ? data.skipped_incomplete
+      : (data.incomplete_candidates || []).length,
+  );
 }
 
 function ScoreCard({ card }) {
@@ -206,6 +228,7 @@ export default function ScoringScreen() {
   const [hasJd, setHasJd] = useState(false);
   const [hasParsedJd, setHasParsedJd] = useState(false);
   const [candidates, setCandidates] = useState([]);
+  const [notYetScored, setNotYetScored] = useState([]);
   const [skippedIncomplete, setSkippedIncomplete] = useState(0);
   const [incompleteCandidates, setIncompleteCandidates] = useState([]);
   const [scoreSummary, setScoreSummary] = useState(null);
@@ -254,6 +277,7 @@ export default function ScoringScreen() {
     async (slug) => {
       if (!slug) {
         setCandidates([]);
+        setNotYetScored([]);
         setIncompleteCandidates([]);
         setSkippedIncomplete(0);
         setScoreSummary(null);
@@ -277,9 +301,12 @@ export default function ScoringScreen() {
       setJdModalError(null);
       try {
         const data = await fetchRoleScores(slug);
-        setCandidates(data.candidates || []);
-        setIncompleteCandidates(data.incomplete_candidates || []);
-        setSkippedIncomplete(data.skipped_incomplete || 0);
+        applyScoreBuckets(data, {
+          setCandidates,
+          setNotYetScored,
+          setIncompleteCandidates,
+          setSkippedIncomplete,
+        });
         setScoreSummary(null);
         setScoringMode(data.scoring_mode || null);
         setNarrativeSummary(null);
@@ -287,6 +314,7 @@ export default function ScoringScreen() {
       } catch (err) {
         setError(err.message);
         setCandidates([]);
+        setNotYetScored([]);
         setIncompleteCandidates([]);
         setSkippedIncomplete(0);
         setScoringMode(null);
@@ -338,7 +366,11 @@ export default function ScoringScreen() {
     try {
       const data = await saveRoleJd(activeSlug, jdDraft.trim());
       applyJdMeta(data, jdDraft.trim());
-      if (candidates.length > 0 || Boolean(scoreSummary)) {
+      if (
+        candidates.length > 0 ||
+        notYetScored.length > 0 ||
+        Boolean(scoreSummary)
+      ) {
         setJdStaleScores(true);
       }
       await refreshRoles();
@@ -357,9 +389,12 @@ export default function ScoringScreen() {
     setNarrativeSummary(null);
     try {
       const data = await scoreRole(activeSlug);
-      setCandidates(data.candidates || []);
-      setIncompleteCandidates(data.incomplete_candidates || []);
-      setSkippedIncomplete(data.skipped_incomplete || 0);
+      applyScoreBuckets(data, {
+        setCandidates,
+        setNotYetScored,
+        setIncompleteCandidates,
+        setSkippedIncomplete,
+      });
       setScoreSummary(data.summary || null);
       setScoringMode(data.scoring_mode || null);
       applyJdMeta(data, jdText);
@@ -381,9 +416,12 @@ export default function ScoringScreen() {
       const data = await narrateRole(activeSlug);
       setNarrativeSummary(data.summary || null);
       const refreshed = await fetchRoleScores(activeSlug);
-      setCandidates(refreshed.candidates || []);
-      setIncompleteCandidates(refreshed.incomplete_candidates || []);
-      setSkippedIncomplete(refreshed.skipped_incomplete || 0);
+      applyScoreBuckets(refreshed, {
+        setCandidates,
+        setNotYetScored,
+        setIncompleteCandidates,
+        setSkippedIncomplete,
+      });
       setScoringMode(refreshed.scoring_mode || null);
       applyJdMeta(refreshed, jdText);
     } catch (err) {
@@ -393,30 +431,48 @@ export default function ScoringScreen() {
     }
   };
 
-  const hasScores = candidates.length > 0;
+  const hasRanked = candidates.length > 0;
+  const hasNotYet = notYetScored.length > 0;
+  const hasIncomplete = incompleteCandidates.length > 0;
   const showResults =
-    hasScores || (Boolean(scoreSummary) && skippedIncomplete > 0);
-  const showJdStep = Boolean(activeSlug) && !hasScores && !hasJd && !scoreSummary;
-  const showScoreCta = Boolean(activeSlug) && !hasScores && hasJd && !scoreSummary;
+    hasRanked ||
+    hasNotYet ||
+    hasIncomplete ||
+    Boolean(scoreSummary);
+  const showJdStep =
+    Boolean(activeSlug) && !hasJd && !hasRanked && !scoreSummary;
+  const showScoreCta =
+    Boolean(activeSlug) &&
+    hasJd &&
+    !hasRanked &&
+    !hasNotYet &&
+    !scoreSummary;
   const busy = loading || scoring || narrating || savingJd;
   const jdModeLabel = hasParsedJd ? 'Brief (JSON)' : 'Text (AI-parsed)';
+  const scoreButtonLabel = scoring
+    ? hasRanked
+      ? 'Re-scoring…'
+      : 'Scoring…'
+    : hasRanked
+      ? 'Re-score'
+      : 'Score candidates';
 
   return (
     <div className="scoring">
       <header className="scoring__toolbar">
         <div className="scoring__brand">Scoring</div>
         <RolePicker busy={busy} />
-        {showResults && activeSlug && (
+        {showResults && activeSlug && hasJd && (
           <button
             type="button"
             className="btn btn--ghost"
             onClick={handleScore}
             disabled={scoring || narrating}
           >
-            {scoring ? 'Re-scoring…' : 'Re-score'}
+            {scoreButtonLabel}
           </button>
         )}
-        {showResults && activeSlug && hasScores && (
+        {showResults && activeSlug && hasRanked && (
           <button
             type="button"
             className="btn btn--ghost"
@@ -547,57 +603,73 @@ export default function ScoringScreen() {
         </section>
       )}
 
-      {activeSlug && !loading && scoring && hasScores && (
+      {activeSlug && !loading && scoring && showResults && (
         <p className="scoring__status mono" role="status">
           {scoringStatusText}
         </p>
       )}
 
       {activeSlug && !loading && showResults && (
-        <section className="scoring__results" aria-label="Scored candidates">
-          <div className="scoring__results-head">
-            <h2 className="scoring__section-title">Ranked candidates</h2>
-            <span className="mono scoring__results-count">{candidates.length}</span>
-            {scoringMode && (
-              <span
-                className={`scoring__jd-mode mono${
-                  scoringMode === 'parsed'
-                    ? ' scoring__jd-mode--parsed'
-                    : ' scoring__jd-mode--text'
-                }`}
-                title="Mode used for the latest score run"
-              >
-                {scoringMode === 'parsed'
-                  ? 'Scored via brief'
-                  : scoringMode === 'mixed'
-                    ? 'Mixed modes'
-                    : 'Scored via AI parse'}
-              </span>
-            )}
-          </div>
-          {skippedIncomplete > 0 && (
-            <p className="scoring__skip-banner mono" role="status">
-              {skippedIncomplete} candidate
-              {skippedIncomplete === 1 ? '' : 's'} skipped — incomplete profile
-              data
-              {scoreSummary ? ` · ${scoreSummary}` : ''}
-            </p>
-          )}
-          {candidates.length > 0 ? (
-            <div className="scoring__cards">
-              {candidates.map((c) => (
-                <ScoreCard key={c.id || c.candidate_id || c.linkedin_url} card={c} />
-              ))}
+        <section className="scoring__results" aria-label="Scoring results">
+          {hasNotYet && (
+            <div
+              className="scoring__bucket scoring__bucket--pending"
+              aria-label="Not yet scored"
+            >
+              <div className="scoring__results-head">
+                <h2 className="scoring__section-title">
+                  Not yet scored ({notYetScored.length})
+                </h2>
+              </div>
+              <p className="scoring__pending-banner mono" role="status">
+                Complete profiles ready to score — run Score / Re-score to rank
+                them.
+              </p>
+              <ul className="scoring__pending-list">
+                {notYetScored.map((c) => {
+                  const name = candidateName(c);
+                  return (
+                    <li key={candidateKey(c)}>
+                      <div className="scoring__pending-identity">
+                        <span className="scoring__pending-name">{name}</span>
+                        <span className="scoring__pending-title">
+                          {titleAtCompany(c)}
+                        </span>
+                      </div>
+                      {c.linkedin_url && (
+                        <a
+                          href={c.linkedin_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="score-card__link"
+                          aria-label={`Open LinkedIn for ${name}`}
+                        >
+                          <ExternalLinkIcon />
+                        </a>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
             </div>
-          ) : (
-            <p className="scoring__section-body">
-              No complete profiles to rank. Retry Full enrich from Sourcing for
-              thin profiles.
-            </p>
           )}
-          {incompleteCandidates.length > 0 && (
-            <div className="scoring__incomplete" aria-label="Incomplete profiles">
-              <h3 className="scoring__incomplete-title">Not scored</h3>
+
+          {hasIncomplete && (
+            <div
+              className="scoring__incomplete"
+              aria-label="Incomplete profiles"
+            >
+              <h3 className="scoring__incomplete-title">
+                Incomplete profile — needs re-pull ({incompleteCandidates.length}
+                )
+              </h3>
+              {skippedIncomplete > 0 && (
+                <p className="scoring__skip-banner mono" role="status">
+                  {skippedIncomplete} candidate
+                  {skippedIncomplete === 1 ? '' : 's'} skipped — incomplete
+                  profile data
+                </p>
+              )}
               <ul className="scoring__incomplete-list">
                 {incompleteCandidates.map((c) => {
                   const name = candidateName(c);
@@ -606,7 +678,7 @@ export default function ScoringScreen() {
                     c.enrich_retry_exhausted;
                   const maxN = c.max_enrich_retry_attempts || 3;
                   return (
-                    <li key={c.id || c.candidate_id || c.linkedin_url}>
+                    <li key={candidateKey(c)}>
                       <span>{name}</span>
                       <span className="scoring__incomplete-status mono">
                         {enrichFailed
@@ -619,6 +691,49 @@ export default function ScoringScreen() {
               </ul>
             </div>
           )}
+
+          <div className="scoring__bucket" aria-label="Ranked candidates">
+            <div className="scoring__results-head">
+              <h2 className="scoring__section-title">
+                Ranked ({candidates.length})
+              </h2>
+              {scoringMode && (
+                <span
+                  className={`scoring__jd-mode mono${
+                    scoringMode === 'parsed'
+                      ? ' scoring__jd-mode--parsed'
+                      : ' scoring__jd-mode--text'
+                  }`}
+                  title="Mode used for the latest score run"
+                >
+                  {scoringMode === 'parsed'
+                    ? 'Scored via brief'
+                    : scoringMode === 'mixed'
+                      ? 'Mixed modes'
+                      : 'Scored via AI parse'}
+                </span>
+              )}
+            </div>
+            {scoreSummary && (
+              <p className="scoring__skip-banner mono" role="status">
+                {scoreSummary}
+              </p>
+            )}
+            {candidates.length > 0 ? (
+              <div className="scoring__cards">
+                {candidates.map((c) => (
+                  <ScoreCard key={candidateKey(c)} card={c} />
+                ))}
+              </div>
+            ) : (
+              <p className="scoring__section-body">
+                No ranked scores yet
+                {hasNotYet
+                  ? ' — score the complete profiles above.'
+                  : '. Retry Full enrich from Sourcing for thin profiles.'}
+              </p>
+            )}
+          </div>
         </section>
       )}
 

@@ -661,8 +661,67 @@ body {
   width: 100%;
 }
 
+.scoring__bucket {
+  width: 100%;
+  margin-bottom: 1.75rem;
+}
+
+.scoring__bucket--pending {
+  padding-bottom: 0.25rem;
+}
+
+.scoring__pending-banner {
+  margin: 0 0 0.75rem;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid #c4a35a;
+  background: rgba(196, 163, 90, 0.08);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.scoring__pending-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  width: 100%;
+}
+
+.scoring__pending-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.scoring__pending-list li:last-child {
+  border-bottom: none;
+}
+
+.scoring__pending-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.scoring__pending-name {
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.scoring__pending-title {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
 .scoring__incomplete {
-  margin-top: 1.5rem;
+  margin: 0 0 1.75rem;
   width: 100%;
 }
 

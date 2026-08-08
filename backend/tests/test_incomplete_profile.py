@@ -274,6 +274,205 @@ def test_score_role_skips_incomplete_and_does_not_send_them():
     assert "incomplete" in (result.get("summary") or "").lower()
 
 
+def test_score_role_sends_all_complete_including_unscored():
+    """Complete-but-never-scored profiles must be included in the scoring API payload."""
+    scored = MagicMock()
+    scored.id = uuid.uuid4()
+    scored.is_complete_profile = True
+    scored.raw_profile = {"experience": [{}], "skills": [{"name": "X"}]}
+    scored.linkedin_url = "https://li/scored"
+
+    never_scored = MagicMock()
+    never_scored.id = uuid.uuid4()
+    never_scored.is_complete_profile = True
+    never_scored.raw_profile = {"experience": [{}], "skills": [{"name": "Y"}]}
+    never_scored.linkedin_url = "https://li/pending"
+
+    incomplete = MagicMock()
+    incomplete.id = uuid.uuid4()
+    incomplete.is_complete_profile = False
+    incomplete.raw_profile = {}
+    incomplete.linkedin_url = "https://li/thin"
+    incomplete.first_name = "Thin"
+    incomplete.last_name = "P"
+    incomplete.headline = ""
+    incomplete.current_title = ""
+    incomplete.current_company = ""
+    incomplete.location = ""
+    incomplete.top_skills = ""
+
+    rc_scored = MagicMock()
+    rc_pending = MagicMock()
+    rc_incomplete = MagicMock()
+    role = MagicMock()
+    role.id = uuid.uuid4()
+    role.jd_text = "HR Assistant"
+    role.jd_parsed = None
+    role.updated_at = None
+    db = MagicMock()
+
+    with patch.object(
+        scoring_service,
+        "_load_role_candidates_for_scoring",
+        return_value=[
+            (scored, rc_scored),
+            (never_scored, rc_pending),
+            (incomplete, rc_incomplete),
+        ],
+    ), patch.object(
+        scoring_service,
+        "_call_scoring_api",
+        return_value=(
+            [
+                {
+                    "candidate_id": str(scored.id),
+                    "total_score": 0.7,
+                    "component_breakdown": {},
+                    "matched_signals": [],
+                    "reasoning": "ok",
+                },
+                {
+                    "candidate_id": str(never_scored.id),
+                    "total_score": 0.5,
+                    "component_breakdown": {},
+                    "matched_signals": [],
+                    "reasoning": "ok",
+                },
+            ],
+            "llm",
+        ),
+    ) as api, patch.object(
+        scoring_service,
+        "list_score_payload",
+        return_value={
+            "ranked": [{"first_name": "A"}, {"first_name": "B"}],
+            "candidates": [{"first_name": "A"}, {"first_name": "B"}],
+            "not_yet_scored": [],
+            "not_yet_scored_count": 0,
+            "count": 2,
+            "skipped_incomplete": 1,
+            "incomplete_candidates": [{"first_name": "Thin"}],
+        },
+    ):
+        scoring_service.score_role(db, role)
+
+    sent = api.call_args[0][0]
+    sent_ids = {row["candidate_id"] for row in sent}
+    assert sent_ids == {str(scored.id), str(never_scored.id)}
+    assert str(incomplete.id) not in sent_ids
+
+
+def test_list_score_payload_three_buckets():
+    """GET scores payload exposes ranked / not_yet_scored / incomplete."""
+    role_id = uuid.uuid4()
+
+    ranked_cand = MagicMock()
+    ranked_cand.id = uuid.uuid4()
+    ranked_cand.is_complete_profile = True
+    ranked_cand.first_name = "Ranked"
+    ranked_cand.last_name = "One"
+    ranked_cand.linkedin_url = "https://li/r"
+    ranked_cand.headline = "HR"
+    ranked_cand.current_title = "HR"
+    ranked_cand.current_company = "Co"
+    ranked_cand.location = "DXB"
+    ranked_cand.top_skills = "X"
+    ranked_cand.enrich_retry_count = 0
+
+    pending_cand = MagicMock()
+    pending_cand.id = uuid.uuid4()
+    pending_cand.is_complete_profile = True
+    pending_cand.first_name = "Pending"
+    pending_cand.last_name = "Two"
+    pending_cand.linkedin_url = "https://li/p"
+    pending_cand.headline = "HR"
+    pending_cand.current_title = "Coordinator"
+    pending_cand.current_company = "Acme"
+    pending_cand.location = "DXB"
+    pending_cand.top_skills = "Y"
+    pending_cand.enrich_retry_count = 0
+
+    thin_cand = MagicMock()
+    thin_cand.id = uuid.uuid4()
+    thin_cand.is_complete_profile = False
+    thin_cand.first_name = "Thin"
+    thin_cand.last_name = "Three"
+    thin_cand.linkedin_url = "https://li/t"
+    thin_cand.headline = ""
+    thin_cand.current_title = "Eng"
+    thin_cand.current_company = "Co"
+    thin_cand.location = "DXB"
+    thin_cand.top_skills = ""
+    thin_cand.enrich_retry_count = 1
+
+    rc_ranked = MagicMock()
+    rc_ranked.total_score = 0.8
+    rc_ranked.component_breakdown = {}
+    rc_ranked.matched_signals = []
+    rc_ranked.reasoning = "ok"
+    rc_ranked.summary_text = None
+    rc_ranked.assessment_text = None
+    rc_ranked.narrative_generated_at = None
+    rc_ranked.narrative_jd_hash = None
+    rc_ranked.scored_at = MagicMock()
+    rc_ranked.scored_at.isoformat.return_value = "2026-08-06T11:07:33+00:00"
+    rc_ranked.scoring_mode = "parsed"
+    rc_ranked.review_status = "reviewing"
+
+    rc_pending = MagicMock()
+    rc_pending.scored_at = None
+    rc_pending.pulled_at = MagicMock()
+
+    rc_thin = MagicMock()
+    rc_thin.scored_at = None
+
+    db = MagicMock()
+
+    def fake_execute(stmt):
+        # Distinguish by inspecting compiled whereclause string-ish; simpler:
+        # return based on call order via side_effect list instead.
+        raise AssertionError("use side_effect")
+
+    exec_ranked = MagicMock()
+    exec_ranked.all.return_value = [(ranked_cand, rc_ranked)]
+    exec_pending = MagicMock()
+    exec_pending.all.return_value = [(pending_cand, rc_pending)]
+    exec_thin = MagicMock()
+    exec_thin.all.return_value = [(thin_cand, rc_thin)]
+    db.execute.side_effect = [exec_ranked, exec_pending, exec_thin]
+
+    with patch.object(
+        scoring_service,
+        "list_incomplete_for_role",
+        return_value=[(thin_cand, rc_thin)],
+    ):
+        # list_score_payload calls list_scored, list_not_yet, then list_incomplete
+        # Override the two list helpers to avoid SQLAlchemy select complexity.
+        with patch.object(
+            scoring_service,
+            "list_scored_candidates",
+            return_value=[scoring_service._scored_card(ranked_cand, rc_ranked)],
+        ), patch.object(
+            scoring_service,
+            "list_not_yet_scored_candidates",
+            return_value=[scoring_service._not_yet_scored_card(pending_cand)],
+        ):
+            result = scoring_service.list_score_payload(db, role_id)
+
+    assert len(result["ranked"]) == 1
+    assert result["ranked"][0]["first_name"] == "Ranked"
+    assert result["candidates"] is result["ranked"] or result["candidates"] == result["ranked"]
+    assert len(result["not_yet_scored"]) == 1
+    assert result["not_yet_scored"][0]["first_name"] == "Pending"
+    assert result["not_yet_scored"][0]["score_status"] == "not_yet_scored"
+    assert "total_score" not in result["not_yet_scored"][0]
+    assert len(result["incomplete_candidates"]) == 1
+    assert result["incomplete_candidates"][0]["first_name"] == "Thin"
+    assert result["count"] == 1
+    assert result["skipped_incomplete"] == 1
+    assert result["not_yet_scored_count"] == 1
+
+
 def test_filter_snapshot_strips_run_keys():
     from app.services.pull_batch import _filter_snapshot
 

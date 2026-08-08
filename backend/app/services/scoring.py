@@ -180,6 +180,14 @@ def _incomplete_card(cand: Candidate, rc: RoleCandidate | None = None) -> dict[s
     return row
 
 
+def _not_yet_scored_card(cand: Candidate) -> dict[str, Any]:
+    """Complete profile awaiting a score — identity only, no score fields."""
+    row = _candidate_row(cand)
+    row["candidate_id"] = str(cand.id)
+    row["score_status"] = "not_yet_scored"
+    return row
+
+
 def list_scored_candidates(db: Session, role_id: uuid.UUID) -> list[dict[str, Any]]:
     """Ranked scored candidates only (complete profiles with a real score)."""
     rows = db.execute(
@@ -196,22 +204,45 @@ def list_scored_candidates(db: Session, role_id: uuid.UUID) -> list[dict[str, An
     return [_scored_card(cand, rc) for cand, rc in rows]
 
 
+def list_not_yet_scored_candidates(
+    db: Session, role_id: uuid.UUID
+) -> list[dict[str, Any]]:
+    """Complete profiles linked to the role that have never been scored."""
+    rows = db.execute(
+        select(Candidate, RoleCandidate)
+        .join(RoleCandidate, RoleCandidate.candidate_id == Candidate.id)
+        .where(
+            RoleCandidate.role_id == role_id,
+            Candidate.is_complete_profile.is_(True),
+            RoleCandidate.scored_at.is_(None),
+        )
+        .order_by(RoleCandidate.pulled_at.desc())
+    ).all()
+    return [_not_yet_scored_card(cand) for cand, _rc in rows]
+
+
 def list_score_payload(db: Session, role_id: uuid.UUID) -> dict[str, Any]:
-    """Scored cards + incomplete skip list for UI."""
-    scored = list_scored_candidates(db, role_id)
+    """Three explicit buckets: ranked, not_yet_scored, incomplete_candidates."""
+    ranked = list_scored_candidates(db, role_id)
+    not_yet = list_not_yet_scored_candidates(db, role_id)
     incomplete_pairs = list_incomplete_for_role(db, role_id)
     incomplete = [_incomplete_card(cand, rc) for cand, rc in incomplete_pairs]
-    modes = {c.get("scoring_mode") for c in scored if c.get("scoring_mode")}
+    modes = {c.get("scoring_mode") for c in ranked if c.get("scoring_mode")}
     scoring_mode = None
     if len(modes) == 1:
         scoring_mode = next(iter(modes))
     elif len(modes) > 1:
         scoring_mode = "mixed"
     return {
-        "candidates": scored,
-        "count": len(scored),
-        "skipped_incomplete": len(incomplete),
+        # Explicit buckets for Scoring UI.
+        "ranked": ranked,
+        "not_yet_scored": not_yet,
         "incomplete_candidates": incomplete,
+        # Backward-compatible aliases (ranked list).
+        "candidates": ranked,
+        "count": len(ranked),
+        "skipped_incomplete": len(incomplete),
+        "not_yet_scored_count": len(not_yet),
         "scoring_mode": scoring_mode,
     }
 
@@ -328,13 +359,15 @@ def score_role(db: Session, role: Role) -> dict[str, Any]:
         role.updated_at = now
         db.commit()
         skipped = len(incomplete)
+        incomplete_cards = [_incomplete_card(c, rc) for c, rc in incomplete]
         return {
+            "ranked": [],
+            "not_yet_scored": [],
+            "incomplete_candidates": incomplete_cards,
             "candidates": [],
             "count": 0,
             "skipped_incomplete": skipped,
-            "incomplete_candidates": [
-                _incomplete_card(c, rc) for c, rc in incomplete
-            ],
+            "not_yet_scored_count": 0,
             "scoring_mode": None,
             "summary": (
                 f"{skipped} candidates skipped — incomplete profile data "
