@@ -1,4 +1,4 @@
-"""SQLAlchemy models matching migrations/001_init.sql (+ 002–009)."""
+"""SQLAlchemy models matching migrations/001_init.sql (+ 002–010)."""
 
 from __future__ import annotations
 
@@ -108,6 +108,10 @@ class RoleCandidate(Base):
     # candidates land in the Review queue automatically.
     review_status: Mapped[str] = mapped_column(
         Text, nullable=False, default="reviewing", server_default="reviewing"
+    )
+    # User dismissed this person for this role only (e.g. enrich exhausted).
+    manually_ignored: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
     )
 
 

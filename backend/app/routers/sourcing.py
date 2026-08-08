@@ -17,7 +17,12 @@ from app.services import chat as chat_service
 from app.services import narrative as narrative_service
 from app.services import review as review_service
 from app.services import scoring as scoring_service
-from app.services.pull_batch import list_role_candidates, pull_batch, retry_incomplete_profiles
+from app.services.pull_batch import (
+    list_role_candidates,
+    pull_batch,
+    retry_incomplete_profiles,
+    set_manually_ignored,
+)
 from app.services.scoring import ScoringTransientError
 
 router = APIRouter(tags=["sourcing"])
@@ -293,6 +298,70 @@ def update_review_status(
         "role": role.slug,
         **result,
     }
+
+
+@protected.post("/roles/{slug}/candidates/{candidate_id}/retry")
+def retry_one_candidate(
+    slug: str,
+    candidate_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """Force Full enrich for one incomplete candidate (bypasses retry cap)."""
+    role = _get_role_by_slug(db, slug)
+    try:
+        return retry_incomplete_profiles(
+            db,
+            role.id,
+            candidate_ids=[candidate_id],
+            force=True,
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ApifyTransientError:
+        return {
+            "upgraded": 0,
+            "still_incomplete": 1,
+            "summary": SOURCE_SLOW_MESSAGE,
+            "error": "apify_transient",
+            "candidates": [],
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong on our side — please try again.",
+        ) from None
+
+
+@protected.post("/roles/{slug}/candidates/{candidate_id}/ignore")
+def ignore_candidate(
+    slug: str,
+    candidate_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """Dismiss this candidate for this role only (does not delete)."""
+    role = _get_role_by_slug(db, slug)
+    try:
+        result = set_manually_ignored(db, role.id, candidate_id, True)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {"role": role.slug, **result}
+
+
+@protected.post("/roles/{slug}/candidates/{candidate_id}/unignore")
+def unignore_candidate(
+    slug: str,
+    candidate_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """Undo a role-scoped dismiss."""
+    role = _get_role_by_slug(db, slug)
+    try:
+        result = set_manually_ignored(db, role.id, candidate_id, False)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {"role": role.slug, **result}
 
 
 @protected.post("/roles/{slug}/pull")

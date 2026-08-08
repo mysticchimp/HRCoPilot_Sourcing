@@ -197,6 +197,7 @@ def list_scored_candidates(db: Session, role_id: uuid.UUID) -> list[dict[str, An
             RoleCandidate.role_id == role_id,
             RoleCandidate.scored_at.is_not(None),
             RoleCandidate.total_score.is_not(None),
+            RoleCandidate.manually_ignored.is_(False),
             Candidate.is_complete_profile.is_(True),
         )
         .order_by(RoleCandidate.total_score.desc().nullslast())
@@ -215,6 +216,7 @@ def list_not_yet_scored_candidates(
             RoleCandidate.role_id == role_id,
             Candidate.is_complete_profile.is_(True),
             RoleCandidate.scored_at.is_(None),
+            RoleCandidate.manually_ignored.is_(False),
         )
         .order_by(RoleCandidate.pulled_at.desc())
     ).all()
@@ -254,7 +256,10 @@ def _load_role_candidates_for_scoring(
         db.execute(
             select(Candidate, RoleCandidate)
             .join(RoleCandidate, RoleCandidate.candidate_id == Candidate.id)
-            .where(RoleCandidate.role_id == role_id)
+            .where(
+                RoleCandidate.role_id == role_id,
+                RoleCandidate.manually_ignored.is_(False),
+            )
         ).all()
     )
 

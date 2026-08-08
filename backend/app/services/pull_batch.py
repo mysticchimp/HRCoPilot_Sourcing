@@ -966,16 +966,22 @@ def _pull_batch_inner(
 
 def list_role_candidates(db: Session, role_id: uuid.UUID) -> list[dict]:
     rows = db.execute(
-        select(Candidate, RoleCandidate.pulled_at, RoleCandidate.batch_id)
+        select(
+            Candidate,
+            RoleCandidate.pulled_at,
+            RoleCandidate.batch_id,
+            RoleCandidate.manually_ignored,
+        )
         .join(RoleCandidate, RoleCandidate.candidate_id == Candidate.id)
         .where(RoleCandidate.role_id == role_id)
         .order_by(RoleCandidate.pulled_at.desc())
     ).all()
     out = []
-    for cand, pulled_at, batch_id in rows:
+    for cand, pulled_at, batch_id, manually_ignored in rows:
         row = _candidate_row(cand)
         row["pulled_at"] = pulled_at.isoformat() if pulled_at else None
         row["batch_id"] = str(batch_id) if batch_id else None
+        row["manually_ignored"] = bool(manually_ignored)
         out.append(row)
     return out
 
@@ -989,6 +995,7 @@ def count_incomplete_for_role(db: Session, role_id: uuid.UUID) -> int:
             .where(
                 RoleCandidate.role_id == role_id,
                 Candidate.is_complete_profile.is_(False),
+                RoleCandidate.manually_ignored.is_(False),
             )
         ).scalar()
         or 0
@@ -998,6 +1005,7 @@ def count_incomplete_for_role(db: Session, role_id: uuid.UUID) -> int:
 def list_incomplete_for_role(
     db: Session, role_id: uuid.UUID
 ) -> list[tuple[Candidate, RoleCandidate]]:
+    """Incomplete stubs for a role (excludes manually ignored)."""
     return list(
         db.execute(
             select(Candidate, RoleCandidate)
@@ -1005,6 +1013,7 @@ def list_incomplete_for_role(
             .where(
                 RoleCandidate.role_id == role_id,
                 Candidate.is_complete_profile.is_(False),
+                RoleCandidate.manually_ignored.is_(False),
             )
         ).all()
     )
@@ -1013,7 +1022,7 @@ def list_incomplete_for_role(
 def list_retryable_incomplete_for_role(
     db: Session, role_id: uuid.UUID
 ) -> list[tuple[Candidate, RoleCandidate]]:
-    """Incomplete stubs still under the auto-retry cap."""
+    """Incomplete stubs still under the auto-retry cap (excludes ignored)."""
     return list(
         db.execute(
             select(Candidate, RoleCandidate)
@@ -1021,21 +1030,99 @@ def list_retryable_incomplete_for_role(
             .where(
                 RoleCandidate.role_id == role_id,
                 Candidate.is_complete_profile.is_(False),
+                RoleCandidate.manually_ignored.is_(False),
                 Candidate.enrich_retry_count < MAX_ENRICH_RETRY_ATTEMPTS,
             )
         ).all()
     )
 
 
-def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]:
-    """Re-attempt Full enrich for incomplete candidates under the retry cap."""
+def _get_role_candidate_pair(
+    db: Session, role_id: uuid.UUID, candidate_id: uuid.UUID
+) -> tuple[Candidate, RoleCandidate]:
+    row = db.execute(
+        select(Candidate, RoleCandidate)
+        .join(RoleCandidate, RoleCandidate.candidate_id == Candidate.id)
+        .where(
+            RoleCandidate.role_id == role_id,
+            Candidate.id == candidate_id,
+        )
+    ).one_or_none()
+    if not row:
+        raise LookupError("candidate not found for this role")
+    return row[0], row[1]
+
+
+def set_manually_ignored(
+    db: Session,
+    role_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    ignored: bool,
+) -> dict[str, Any]:
+    """Toggle role-scoped dismiss; does not delete the candidate."""
+    cand, rc = _get_role_candidate_pair(db, role_id, candidate_id)
+    rc.manually_ignored = bool(ignored)
+    db.commit()
+    row = _candidate_row(cand)
+    row["manually_ignored"] = bool(rc.manually_ignored)
+    row["pulled_at"] = rc.pulled_at.isoformat() if rc.pulled_at else None
+    row["batch_id"] = str(rc.batch_id) if rc.batch_id else None
+    return {
+        "ok": True,
+        "candidate_id": str(candidate_id),
+        "manually_ignored": bool(rc.manually_ignored),
+        "candidate": row,
+    }
+
+
+def retry_incomplete_profiles(
+    db: Session,
+    role_id: uuid.UUID,
+    *,
+    candidate_ids: list[uuid.UUID] | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Re-attempt Full enrich for incomplete candidates under the retry cap.
+
+    When candidate_ids is set, only those rows are targeted. force=True allows
+    retrying past MAX_ENRICH_RETRY_ATTEMPTS (manual per-row Retry) and resets
+    enrich_retry_count to 0 before the attempt; a miss restores the cap so the
+    row stays in the failed state.
+    """
     role = db.get(Role, role_id)
     if not role:
         raise ValueError(f"role {role_id} not found")
 
-    all_incomplete = list_incomplete_for_role(db, role_id)
-    pairs = list_retryable_incomplete_for_role(db, role_id)
-    exhausted_n = len(all_incomplete) - len(pairs)
+    if candidate_ids is not None:
+        id_set = {uuid.UUID(str(c)) for c in candidate_ids}
+        pairs: list[tuple[Candidate, RoleCandidate]] = []
+        for cid in id_set:
+            cand, rc = _get_role_candidate_pair(db, role_id, cid)
+            if rc.manually_ignored:
+                raise ValueError(
+                    "candidate is ignored for this role — unignore before retry"
+                )
+            if cand.is_complete_profile:
+                raise ValueError("candidate already has a complete profile")
+            if (
+                not force
+                and _enrich_retry_count(cand) >= MAX_ENRICH_RETRY_ATTEMPTS
+            ):
+                raise ValueError(
+                    f"candidate failed after {MAX_ENRICH_RETRY_ATTEMPTS} "
+                    "attempts — use force retry"
+                )
+            pairs.append((cand, rc))
+        all_incomplete = pairs
+        exhausted_n = 0
+        if force:
+            for cand, _rc in pairs:
+                cand.enrich_retry_count = 0
+    else:
+        all_incomplete = list_incomplete_for_role(db, role_id)
+        pairs = list_retryable_incomplete_for_role(db, role_id)
+        exhausted_n = len(all_incomplete) - len(pairs)
+
     if not pairs:
         if exhausted_n:
             return {
@@ -1071,6 +1158,9 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
         raw = cand.raw_profile if isinstance(cand.raw_profile, dict) else {}
         short_by_url[url] = raw
 
+    if not target_urls:
+        raise ValueError("candidate has no LinkedIn URL to enrich")
+
     retrieval = dict(role.retrieval or {})
     pool_cap = int(retrieval.get("pool_cap") or 25)
     compiled = compile_retrieval({"retrieval": retrieval}, pool_cap)
@@ -1090,11 +1180,12 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
     )
 
     logger.info(
-        "retry_incomplete role_id=%s slug=%s targets=%s used_persisted=%s "
-        "dropped_keys=%s full_input=%s",
+        "retry_incomplete role_id=%s slug=%s targets=%s force=%s "
+        "used_persisted=%s dropped_keys=%s full_input=%s",
         role_id,
         role.slug,
         len(target_urls),
+        force,
         used_persisted,
         dropped_keys,
         json.dumps(full_input, default=str),
@@ -1108,6 +1199,10 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
             e.status,
             e.run_id,
         )
+        if force and candidate_ids is not None:
+            for cand, _rc in pairs:
+                cand.enrich_retry_count = MAX_ENRICH_RETRY_ATTEMPTS
+            db.commit()
         return {
             "upgraded": 0,
             "still_incomplete": len(incomplete),
@@ -1149,6 +1244,10 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
                 e.status,
                 e.run_id,
             )
+            if force and candidate_ids is not None:
+                for cand, _rc in pairs:
+                    cand.enrich_retry_count = MAX_ENRICH_RETRY_ATTEMPTS
+                db.commit()
             return {
                 "upgraded": 0,
                 "still_incomplete": len(incomplete),
@@ -1198,6 +1297,8 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
         params_snapshot={
             "profileScraperMode": mode,
             "retry_incomplete": True,
+            "manual_single": bool(candidate_ids is not None),
+            "force": force,
             "target_count": len(target_urls),
             "actor_status": status,
             "full_enrich_raw_count": len(by_url),
@@ -1222,9 +1323,14 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
                 by_stem=by_stem,
             )
         if not profile:
-            cand.enrich_retry_count = _enrich_retry_count(cand) + 1
-            if is_enrich_retry_exhausted(cand):
+            if force and candidate_ids is not None:
+                # Manual Retry miss — keep the exhausted badge.
+                cand.enrich_retry_count = MAX_ENRICH_RETRY_ATTEMPTS
                 newly_exhausted += 1
+            else:
+                cand.enrich_retry_count = _enrich_retry_count(cand) + 1
+                if is_enrich_retry_exhausted(cand):
+                    newly_exhausted += 1
             still.append(cand)
             continue
         display = compact(profile, i)
@@ -1237,15 +1343,28 @@ def retry_incomplete_profiles(db: Session, role_id: uuid.UUID) -> dict[str, Any]
     db.commit()
 
     exhausted_total = exhausted_n + newly_exhausted
-    summary = (
-        f"Retry incomplete: upgraded {len(upgraded)}, "
-        f"still incomplete {len(still) + exhausted_n}"
-    )
-    if newly_exhausted:
-        summary += (
-            f" ({newly_exhausted} hit {MAX_ENRICH_RETRY_ATTEMPTS}-attempt cap)"
+    if candidate_ids is not None and len(incomplete) == 1:
+        name = (
+            f"{(incomplete[0].first_name or '').strip()} "
+            f"{(incomplete[0].last_name or '').strip()}"
+        ).strip() or "candidate"
+        if upgraded:
+            summary = f"Retry {name}: upgraded to complete profile."
+        else:
+            summary = (
+                f"Retry {name}: still incomplete "
+                f"(failed after {MAX_ENRICH_RETRY_ATTEMPTS} attempts)."
+            )
+    else:
+        summary = (
+            f"Retry incomplete: upgraded {len(upgraded)}, "
+            f"still incomplete {len(still) + exhausted_n}"
         )
-    summary += "."
+        if newly_exhausted:
+            summary += (
+                f" ({newly_exhausted} hit {MAX_ENRICH_RETRY_ATTEMPTS}-attempt cap)"
+            )
+        summary += "."
     if dropped_keys:
         summary += f" (relaxed filters: dropped {', '.join(dropped_keys)})"
     logger.info(

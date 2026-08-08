@@ -4,9 +4,12 @@ import RolePicker from './RolePicker';
 import { useRole } from '../lib/roleContext';
 import {
   fetchRoleCandidates,
+  ignoreCandidate,
   retryIncompleteProfiles,
+  retryOneCandidate,
   sendChatMessage,
   startSession,
+  unignoreCandidate,
 } from '../lib/sourcingApi';
 
 const CHAT_MIN = 240;
@@ -46,6 +49,8 @@ export default function SourcingScreen() {
   const [summary, setSummary] = useState(null);
   const [chatWidth, setChatWidth] = useState(CHAT_DEFAULT);
   const [retryingIncomplete, setRetryingIncomplete] = useState(false);
+  const [rowActionId, setRowActionId] = useState(null);
+  const [ignoredOpen, setIgnoredOpen] = useState(false);
   const threadRef = useRef(null);
   const inputRef = useRef(null);
   const dragRef = useRef({ active: false, startX: 0, startW: CHAT_DEFAULT });
@@ -181,7 +186,9 @@ export default function SourcingScreen() {
     }
   };
 
-  const incompleteCandidates = candidates.filter(
+  const activeCandidates = candidates.filter((c) => !c.manually_ignored);
+  const ignoredCandidates = candidates.filter((c) => c.manually_ignored);
+  const incompleteCandidates = activeCandidates.filter(
     (c) => c.is_complete_profile === false
   );
   const retryableIncomplete = incompleteCandidates.filter(
@@ -193,6 +200,14 @@ export default function SourcingScreen() {
   const incompleteCount = incompleteCandidates.length;
   const retryableCount = retryableIncomplete.length;
   const exhaustedCount = exhaustedIncomplete.length;
+
+  const mergeCandidateUpdate = (updated) => {
+    if (!updated?.id) return;
+    setCandidates((prev) => {
+      const rest = prev.filter((c) => c.id !== updated.id);
+      return [updated, ...rest];
+    });
+  };
 
   const handleRetryIncomplete = async () => {
     if (!activeSlug || activeSlug === 'new' || retryingIncomplete) return;
@@ -207,6 +222,63 @@ export default function SourcingScreen() {
       setError(err.message);
     } finally {
       setRetryingIncomplete(false);
+    }
+  };
+
+  const handleRetryOne = async (candidate) => {
+    if (!activeSlug || !candidate?.id || rowActionId) return;
+    setRowActionId(candidate.id);
+    setError(null);
+    try {
+      const data = await retryOneCandidate(activeSlug, candidate.id);
+      if (data.summary) setSummary(data.summary);
+      const updated = (data.candidates || []).find((c) => c.id === candidate.id);
+      if (updated) {
+        mergeCandidateUpdate({ ...updated, manually_ignored: false });
+      } else {
+        await loadCandidates(activeSlug);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRowActionId(null);
+    }
+  };
+
+  const handleIgnoreOne = async (candidate) => {
+    if (!activeSlug || !candidate?.id || rowActionId) return;
+    setRowActionId(candidate.id);
+    setError(null);
+    try {
+      const data = await ignoreCandidate(activeSlug, candidate.id);
+      const updated = data.candidate || {
+        ...candidate,
+        manually_ignored: true,
+      };
+      mergeCandidateUpdate(updated);
+      setIgnoredOpen(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRowActionId(null);
+    }
+  };
+
+  const handleUnignoreOne = async (candidate) => {
+    if (!activeSlug || !candidate?.id || rowActionId) return;
+    setRowActionId(candidate.id);
+    setError(null);
+    try {
+      const data = await unignoreCandidate(activeSlug, candidate.id);
+      const updated = data.candidate || {
+        ...candidate,
+        manually_ignored: false,
+      };
+      mergeCandidateUpdate(updated);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRowActionId(null);
     }
   };
 
@@ -344,13 +416,15 @@ export default function SourcingScreen() {
         <section className="sourcing__results" aria-label="Pulled candidates">
           <div className="sourcing__results-head">
             <h2 className="sourcing__results-title">Results</h2>
-            <span className="mono sourcing__results-count">{candidates.length}</span>
+            <span className="mono sourcing__results-count">
+              {activeCandidates.length}
+            </span>
             {retryableCount > 0 && (
               <button
                 type="button"
                 className="btn btn--ghost sourcing__retry-incomplete"
                 onClick={handleRetryIncomplete}
-                disabled={retryingIncomplete || busy}
+                disabled={retryingIncomplete || busy || Boolean(rowActionId)}
               >
                 {retryingIncomplete
                   ? 'Retrying incomplete…'
@@ -370,8 +444,8 @@ export default function SourcingScreen() {
               {retryableCount > 0 && exhaustedCount > 0 ? ' ' : null}
               {exhaustedCount > 0 && (
                 <>
-                  {exhaustedCount} failed after 3 attempts — manual re-pull
-                  only (auto-retry stopped).
+                  {exhaustedCount} failed after 3 attempts — use Retry or Ignore
+                  per row.
                 </>
               )}{' '}
               Not scored until upgraded.
@@ -386,17 +460,18 @@ export default function SourcingScreen() {
                   <th>Location</th>
                   <th>Headline</th>
                   <th>LinkedIn</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {candidates.length === 0 && (
+                {activeCandidates.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="sourcing-table__empty">
+                    <td colSpan={6} className="sourcing-table__empty">
                       No profiles pulled yet for this role.
                     </td>
                   </tr>
                 )}
-                {candidates.map((c) => {
+                {activeCandidates.map((c) => {
                   const name =
                     `${c.first_name ?? ''} ${c.last_name ?? ''}`.trim() || '—';
                   const titleCo = [c.current_title, c.current_company]
@@ -407,6 +482,7 @@ export default function SourcingScreen() {
                     incomplete &&
                     (c.enrich_status === 'enrich_failed' ||
                       c.enrich_retry_exhausted);
+                  const rowBusy = rowActionId === c.id;
                   return (
                     <tr
                       key={c.id || c.linkedin_url}
@@ -430,7 +506,7 @@ export default function SourcingScreen() {
                               }
                               title={
                                 enrichFailed
-                                  ? 'Full enrich failed 3 times — stopped auto-retry; needs manual re-pull'
+                                  ? 'Full enrich failed 3 times — Retry or Ignore'
                                   : 'Full profile enrich failed — Short stub only'
                               }
                             >
@@ -444,9 +520,7 @@ export default function SourcingScreen() {
                       <td>{titleCo || '—'}</td>
                       <td>{c.location || '—'}</td>
                       <td className="sourcing-table__headline">
-                        {incomplete
-                          ? '—'
-                          : c.headline || '—'}
+                        {incomplete ? '—' : c.headline || '—'}
                       </td>
                       <td>
                         {c.linkedin_url ? (
@@ -463,12 +537,86 @@ export default function SourcingScreen() {
                           '—'
                         )}
                       </td>
+                      <td>
+                        {enrichFailed ? (
+                          <div className="sourcing-table__actions">
+                            <button
+                              type="button"
+                              className="btn btn--ghost sourcing-table__action"
+                              onClick={() => handleRetryOne(c)}
+                              disabled={rowBusy || busy || retryingIncomplete}
+                            >
+                              {rowBusy ? 'Retrying…' : 'Retry'}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn--ghost sourcing-table__action"
+                              onClick={() => handleIgnoreOne(c)}
+                              disabled={rowBusy || busy || retryingIncomplete}
+                            >
+                              Ignore
+                            </button>
+                          </div>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
           </div>
+
+          {ignoredCandidates.length > 0 && (
+            <div className="sourcing__ignored" aria-label="Ignored candidates">
+              <button
+                type="button"
+                className="sourcing__ignored-toggle"
+                aria-expanded={ignoredOpen}
+                onClick={() => setIgnoredOpen((v) => !v)}
+              >
+                Ignored ({ignoredCandidates.length})
+                <span className="mono">{ignoredOpen ? '▾' : '▸'}</span>
+              </button>
+              {ignoredOpen && (
+                <ul className="sourcing__ignored-list">
+                  {ignoredCandidates.map((c) => {
+                    const name =
+                      `${c.first_name ?? ''} ${c.last_name ?? ''}`.trim() ||
+                      '—';
+                    const rowBusy = rowActionId === c.id;
+                    return (
+                      <li key={c.id || c.linkedin_url}>
+                        <div className="sourcing__ignored-identity">
+                          <span>{name}</span>
+                          {c.linkedin_url && (
+                            <a
+                              href={c.linkedin_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="sourcing-table__link"
+                              aria-label={`Open LinkedIn for ${name}`}
+                            >
+                              <ExternalLinkIcon />
+                            </a>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn--ghost sourcing-table__action"
+                          onClick={() => handleUnignoreOne(c)}
+                          disabled={rowBusy || busy}
+                        >
+                          {rowBusy ? '…' : 'Unignore'}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
         </section>
       </div>
     </div>

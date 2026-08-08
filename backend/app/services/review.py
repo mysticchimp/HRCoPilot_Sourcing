@@ -58,6 +58,7 @@ def _review_counts(db: Session, role_id: uuid.UUID) -> dict[str, int]:
             RoleCandidate.role_id == role_id,
             RoleCandidate.scored_at.is_not(None),
             RoleCandidate.total_score.is_not(None),
+            RoleCandidate.manually_ignored.is_(False),
             Candidate.is_complete_profile.is_(True),
         )
         .group_by(RoleCandidate.review_status)
@@ -86,6 +87,7 @@ def list_review_queue(
             RoleCandidate.review_status == status,
             RoleCandidate.scored_at.is_not(None),
             RoleCandidate.total_score.is_not(None),
+            RoleCandidate.manually_ignored.is_(False),
             Candidate.is_complete_profile.is_(True),
         )
         .order_by(RoleCandidate.total_score.desc().nullslast())

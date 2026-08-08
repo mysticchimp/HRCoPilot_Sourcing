@@ -153,3 +153,24 @@ export function retryIncompleteProfiles(slug) {
     method: 'POST',
   });
 }
+
+export function retryOneCandidate(slug, candidateId) {
+  return request(
+    `/roles/${encodeURIComponent(slug)}/candidates/${encodeURIComponent(candidateId)}/retry`,
+    { method: 'POST' },
+  );
+}
+
+export function ignoreCandidate(slug, candidateId) {
+  return request(
+    `/roles/${encodeURIComponent(slug)}/candidates/${encodeURIComponent(candidateId)}/ignore`,
+    { method: 'POST' },
+  );
+}
+
+export function unignoreCandidate(slug, candidateId) {
+  return request(
+    `/roles/${encodeURIComponent(slug)}/candidates/${encodeURIComponent(candidateId)}/unignore`,
+    { method: 'POST' },
+  );
+}

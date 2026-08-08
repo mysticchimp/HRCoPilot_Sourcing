@@ -118,6 +118,7 @@ def narrate_role(db: Session, role: Role) -> dict[str, Any]:
                 RoleCandidate.role_id == role.id,
                 RoleCandidate.scored_at.is_not(None),
                 RoleCandidate.total_score.is_not(None),
+                RoleCandidate.manually_ignored.is_(False),
                 Candidate.is_complete_profile.is_(True),
             )
         ).all()

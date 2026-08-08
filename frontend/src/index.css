@@ -1352,6 +1352,69 @@ body {
   color: var(--ink-3);
 }
 
+.sourcing-table__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.sourcing-table__action {
+  font-size: 0.7rem;
+  padding: 0.2rem 0.45rem;
+  min-height: 0;
+}
+
+.sourcing__ignored {
+  margin-top: 1.25rem;
+  width: 100%;
+}
+
+.sourcing__ignored-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: transparent;
+  border: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 0;
+  cursor: pointer;
+}
+
+.sourcing__ignored-toggle:hover {
+  color: var(--ink);
+}
+
+.sourcing__ignored-list {
+  list-style: none;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  border: 1px solid var(--line);
+}
+
+.sourcing__ignored-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.875rem;
+  color: var(--ink-3);
+}
+
+.sourcing__ignored-list li:last-child {
+  border-bottom: none;
+}
+
+.sourcing__ignored-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
 .sourcing-table__empty {
   color: var(--ink-3);
   text-align: center;
